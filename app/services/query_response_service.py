@@ -3,10 +3,15 @@ from app.services.conversation_service import (
     get_conversations_for_today,
     get_last_conversation,
 )
-from app.services.project_service import get_project_operational_summary, get_projects_by_client_id
+from app.services.project_service import (
+    get_executive_project_snapshot,
+    get_project_operational_summary,
+    get_projects_by_client_id,
+)
 from app.services.reference_resolver import resolve_references
 from app.services.task_service import (
     add_task_note_conversational,
+    get_executive_task_snapshot,
     get_open_tasks_by_client_id,
     get_task_operational_summary,
     get_tasks_by_client_id,
@@ -49,6 +54,15 @@ TASK_UPDATE_INTENTS = {
     "update_task_priority_by_name",
 }
 
+EXECUTIVE_INTENTS = {
+    "get_blocked_items_summary",
+    "get_today_priority_summary",
+    "get_overdue_or_stuck_summary",
+    "get_client_attention_summary",
+    "get_project_attention_summary",
+    "get_general_executive_summary",
+}
+
 
 def build_response_from_query(
     parsed_query: dict,
@@ -68,6 +82,9 @@ def build_response_from_query(
         for client in clients:
             lines.append(f"- {client.name}")
         return "\n".join(lines)
+
+    if intent in EXECUTIVE_INTENTS:
+        return _handle_executive_intent(parsed_query, user_query, conversation_context)
 
     if intent == "get_client_summary":
         client_message = _require_resolved_entity(resolved_references, "client", "cliente", action_text="resumir")
@@ -442,11 +459,271 @@ def _finalize_update_response(parsed_query: dict, resolved_references: dict, upd
     return f"Listo. Actualice la tarea '{result['task_title']}'. Cambio {field_labels.get(result['field'], result['field'])}: '{old_value}' -> '{new_value}'."
 
 
+def _handle_executive_intent(parsed_query: dict, user_query: str | None, conversation_context: dict | None) -> str:
+    context = conversation_context or {}
+    if _should_use_contextual_executive_view(user_query, context):
+        response = _build_contextual_executive_response(parsed_query, context)
+        if response:
+            return response
+
+    snapshot = get_executive_task_snapshot()
+    project_snapshot = get_executive_project_snapshot()
+    client_snapshot = _build_client_attention_snapshot(snapshot)
+
+    parsed_query["_executive_scope"] = "global"
+    parsed_query["_executive_heuristic"] = snapshot["heuristic"]
+    parsed_query["_executive_entities"] = {
+        "tasks": [item["title"] for item in snapshot["recommended_tasks"][:3]],
+        "projects": [item["project_name"] for item in project_snapshot["prioritized_projects"][:3]],
+        "clients": [item["client_name"] for item in client_snapshot["prioritized_clients"][:3]],
+    }
+
+    intent = parsed_query.get("intent")
+    parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
+
+    if intent == "get_blocked_items_summary":
+        return _format_blocked_summary(snapshot, project_snapshot)
+    if intent == "get_today_priority_summary":
+        return _format_today_priority_summary(snapshot)
+    if intent == "get_overdue_or_stuck_summary":
+        return _format_overdue_or_stuck_summary(snapshot, project_snapshot)
+    if intent == "get_client_attention_summary":
+        return _format_client_attention_summary(client_snapshot)
+    if intent == "get_project_attention_summary":
+        return _format_project_attention_summary(project_snapshot)
+    return _format_general_executive_summary(snapshot, project_snapshot, client_snapshot)
+
+
+def _should_use_contextual_executive_view(user_query: str | None, context: dict) -> bool:
+    if not user_query or not context or not context.get("_isolated"):
+        return False
+    normalized = user_query.strip().lower()
+    if "que sigue" not in normalized and "mas urgente" not in normalized and "lo mas urgente" not in normalized:
+        return False
+    return context.get("scope") in {"task", "project", "client"}
+
+
+def _build_contextual_executive_response(parsed_query: dict, context: dict) -> str | None:
+    scope = context.get("scope")
+    parsed_query["_executive_scope"] = f"contextual_{scope}"
+    parsed_query["_context_source"] = "current"
+    parsed_query["_context_isolated"] = True
+    parsed_query["_executive_heuristic"] = ["prioriza siguiente paso dentro del contexto actual"]
+    parsed_query["_conversation_context"] = context
+
+    if scope == "task" and context.get("task"):
+        summary = get_task_operational_summary(context["task"]["id"])
+        if not summary:
+            return None
+        parsed_query["_executive_entities"] = {"tasks": [summary["title"]]}
+        return "\n".join(
+            [
+                f"En esta conversacion, lo que sigue con la tarea {summary['title']} es:",
+                f"- Proxima accion: {summary['next_action'] or 'Sin proxima accion definida'}",
+                f"- Estado: {summary['status']}",
+                f"- Prioridad: {summary['priority']}",
+            ]
+        )
+
+    if scope == "project" and context.get("project"):
+        tasks = get_tasks_by_project_id(context["project"]["id"])
+        open_tasks = [task for task in tasks if task.status != "hecha"]
+        prioritized = sorted(open_tasks, key=lambda task: _task_sort_tuple(task))[:3]
+        parsed_query["_executive_entities"] = {"project": context["project"]["name"], "tasks": [task.title for task in prioritized]}
+        lines = [f"En el proyecto {context['project']['name']}, esto es lo que sigue:"]
+        for task in prioritized:
+            lines.append(f"- {task.title} | {task.status} | prioridad {task.priority}")
+        return "\n".join(lines) if prioritized else f"En el proyecto {context['project']['name']} no hay tareas abiertas."
+
+    if scope == "client" and context.get("client"):
+        tasks = get_open_tasks_by_client_id(context["client"]["id"])
+        prioritized = sorted(tasks, key=lambda task: _task_sort_tuple(task))[:3]
+        parsed_query["_executive_entities"] = {"client": context["client"]["name"], "tasks": [task.title for task in prioritized]}
+        lines = [f"Con {context['client']['name']}, lo mas importante ahora es:"]
+        for task in prioritized:
+            project_name = task.project.name if task.project else "Sin proyecto"
+            lines.append(f"- {task.title} | {task.status} | prioridad {task.priority} | Proyecto: {project_name}")
+        return "\n".join(lines) if prioritized else f"Con {context['client']['name']} no hay tareas abiertas."
+
+    return None
+
+
+def _build_client_attention_snapshot(task_snapshot: dict) -> dict:
+    clients: dict[int | str, dict] = {}
+    for item in task_snapshot["open_tasks"]:
+        client_id = item["client_id"] or item["client_name"]
+        if client_id not in clients:
+            clients[client_id] = {
+                "client_id": item["client_id"],
+                "client_name": item["client_name"],
+                "open_tasks": 0,
+                "blocked_tasks": 0,
+                "high_priority_open_tasks": 0,
+                "overdue_open_tasks": 0,
+                "score": 0,
+            }
+
+        client = clients[client_id]
+        client["open_tasks"] += 1
+        client["blocked_tasks"] += int(item["is_blocked"])
+        client["high_priority_open_tasks"] += int(item["is_high_priority"])
+        client["overdue_open_tasks"] += int(item["is_overdue"])
+
+    for client in clients.values():
+        client["score"] = (
+            client["blocked_tasks"] * 5
+            + client["high_priority_open_tasks"] * 3
+            + client["overdue_open_tasks"] * 2
+            + client["open_tasks"] * 2
+        )
+
+    ranked = sorted(clients.values(), key=lambda item: (-item["score"], item["client_name"]))
+    return {
+        "clients": list(clients.values()),
+        "prioritized_clients": ranked[:5],
+        "heuristic": [
+            "clientes con mas bloqueos primero",
+            "despues mas alta prioridad abierta",
+            "despues mas vencidas",
+            "despues mayor carga abierta",
+        ],
+    }
+
+
+def _format_blocked_summary(task_snapshot: dict, project_snapshot: dict) -> str:
+    blocked_tasks = task_snapshot["blocked_tasks"][:5]
+    blocked_projects = [item for item in project_snapshot["prioritized_projects"] if item["blocked_tasks"] > 0][:3]
+    if not blocked_tasks:
+        return "Hoy no encontre tareas bloqueadas abiertas."
+
+    lines = ["Esto esta bloqueado ahora:"]
+    for item in blocked_tasks:
+        lines.append(f"- {item['title']} | Cliente: {item['client_name']} | Proyecto: {item['project_name']} | Prioridad: {item['priority']}")
+    if blocked_projects:
+        lines.append("")
+        lines.append("Proyectos mas trabados:")
+        for item in blocked_projects:
+            lines.append(f"- {item['project_name']} ({item['client_name']}) | Bloqueadas: {item['blocked_tasks']} | Abiertas: {item['open_tasks']}")
+    return "\n".join(lines)
+
+
+def _format_today_priority_summary(task_snapshot: dict) -> str:
+    recommended = task_snapshot["recommended_tasks"]
+    if not recommended:
+        return "Hoy no encontre tareas abiertas para priorizar."
+
+    lines = ["Esto deberias mirar primero hoy:"]
+    for item in recommended:
+        reason = _task_reason_label(item)
+        lines.append(f"- {item['title']} | {reason} | Cliente: {item['client_name']} | Proyecto: {item['project_name']}")
+    return "\n".join(lines)
+
+
+def _format_overdue_or_stuck_summary(task_snapshot: dict, project_snapshot: dict) -> str:
+    overdue = task_snapshot["overdue_tasks"][:5]
+    stuck_projects = [item for item in project_snapshot["prioritized_projects"] if item["blocked_tasks"] > 0 or item["overdue_open_tasks"] > 0][:3]
+    if not overdue and not stuck_projects:
+        return "No encontre tareas vencidas ni proyectos claramente trabados."
+
+    lines = ["Lo mas atrasado o trabado ahora es:"]
+    for item in overdue:
+        lines.append(f"- {item['title']} | Vence: {item['due_date']} | Cliente: {item['client_name']} | Proyecto: {item['project_name']}")
+    for item in stuck_projects:
+        lines.append(f"- Proyecto {item['project_name']} ({item['client_name']}) | Bloqueadas: {item['blocked_tasks']} | Abiertas: {item['open_tasks']}")
+    return "\n".join(lines)
+
+
+def _format_client_attention_summary(client_snapshot: dict) -> str:
+    prioritized = client_snapshot["prioritized_clients"]
+    if not prioritized:
+        return "No encontre clientes con carga operativa abierta."
+
+    top = prioritized[0]
+    lines = [f"El cliente que necesita atencion primero es {top['client_name']}."]
+    lines.append(
+        f"Tiene {top['open_tasks']} tareas abiertas, {top['blocked_tasks']} bloqueadas y {top['high_priority_open_tasks']} de alta prioridad."
+    )
+    if len(prioritized) > 1:
+        lines.append("")
+        lines.append("Despues seguirian:")
+        for item in prioritized[1:4]:
+            lines.append(f"- {item['client_name']} | Abiertas: {item['open_tasks']} | Bloqueadas: {item['blocked_tasks']}")
+    return "\n".join(lines)
+
+
+def _format_project_attention_summary(project_snapshot: dict) -> str:
+    prioritized = project_snapshot["prioritized_projects"]
+    if not prioritized:
+        return "No encontre proyectos con carga operativa abierta."
+
+    top = prioritized[0]
+    lines = [f"El proyecto mas trabado ahora es {top['project_name']} ({top['client_name']})."]
+    lines.append(
+        f"Tiene {top['open_tasks']} tareas abiertas, {top['blocked_tasks']} bloqueadas y {top['high_priority_open_tasks']} de alta prioridad."
+    )
+    if len(prioritized) > 1:
+        lines.append("")
+        lines.append("Otros proyectos a mirar:")
+        for item in prioritized[1:4]:
+            lines.append(f"- {item['project_name']} ({item['client_name']}) | Abiertas: {item['open_tasks']} | Bloqueadas: {item['blocked_tasks']}")
+    return "\n".join(lines)
+
+
+def _format_general_executive_summary(task_snapshot: dict, project_snapshot: dict, client_snapshot: dict) -> str:
+    lines = ["Resumen ejecutivo actual:"]
+    lines.append(f"- Tareas abiertas: {len(task_snapshot['open_tasks'])}")
+    lines.append(f"- Bloqueadas: {len(task_snapshot['blocked_tasks'])}")
+    lines.append(f"- Urgentes: {len(task_snapshot['urgent_tasks'])}")
+
+    if task_snapshot["recommended_tasks"]:
+        top_task = task_snapshot["recommended_tasks"][0]
+        lines.append(f"- Lo mas urgente: {top_task['title']} ({_task_reason_label(top_task)})")
+    if project_snapshot["prioritized_projects"]:
+        top_project = project_snapshot["prioritized_projects"][0]
+        lines.append(f"- Proyecto mas sensible: {top_project['project_name']} ({top_project['client_name']})")
+    if client_snapshot["prioritized_clients"]:
+        top_client = client_snapshot["prioritized_clients"][0]
+        lines.append(f"- Cliente a mirar primero: {top_client['client_name']}")
+    return "\n".join(lines)
+
+
+def _task_reason_label(item: dict) -> str:
+    reasons = []
+    if item["is_blocked"]:
+        reasons.append("bloqueada")
+    if item["is_overdue"]:
+        reasons.append("vencida")
+    elif item["is_due_today"]:
+        reasons.append("vence hoy")
+    if item["is_high_priority"]:
+        reasons.append("alta prioridad")
+    if item["is_in_progress"]:
+        reasons.append("en progreso")
+    return ", ".join(reasons) or item["status"]
+
+
+def _task_sort_tuple(task) -> tuple:
+    blocked = 1 if task.status == "bloqueada" else 0
+    due = str(task.due_date) if task.due_date else "9999-12-31"
+    high = 1 if task.priority == "alta" else 0
+    progress = 1 if task.status == "en_progreso" else 0
+    return (-blocked, due, -high, -progress, task.title)
+
+
 def _resolve_if_needed(parsed_query: dict, user_query: str | None, conversation_context: dict | None = None) -> dict:
     intent = parsed_query.get("intent")
     if intent not in REFERENCE_AWARE_INTENTS:
         resolved = {"scope": "none", "confidence": 0.0, "ambiguous": False, "source": "none"}
         parsed_query["_resolved_references"] = resolved
+        parsed_query["_resolver_scope"] = "none"
+        parsed_query["_resolver_source"] = "none"
+        parsed_query["_resolver_confidence"] = 0.0
+        parsed_query["_resolver_ambiguous"] = False
+        parsed_query["_recent_context_used"] = {}
+        parsed_query["_context_source"] = "none"
+        parsed_query["_context_isolated"] = False
+        parsed_query["_security_blocked"] = False
+        parsed_query["_security_reason"] = None
         return resolved
 
     resolved = resolve_references(

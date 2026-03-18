@@ -2,6 +2,15 @@ from app.config import USE_LLM_PARSER
 from app.services.llm_parser_service import parse_query_with_llm
 from app.services.query_parser_service import parse_user_query as parse_user_query_rules
 
+EXECUTIVE_INTENTS = {
+    "get_blocked_items_summary",
+    "get_today_priority_summary",
+    "get_overdue_or_stuck_summary",
+    "get_client_attention_summary",
+    "get_project_attention_summary",
+    "get_general_executive_summary",
+}
+
 
 def parse_user_query_hybrid(query: str) -> dict:
     rules_result = parse_user_query_rules(query)
@@ -35,6 +44,8 @@ def _should_prefer_rules(query: str, rules_result: dict, llm_result: dict | None
     llm_intent = (llm_result or {}).get("intent", "unknown")
 
     if rules_intent not in (None, "", "unknown"):
+        if rules_intent in EXECUTIVE_INTENTS:
+            return True
         if _is_short_or_follow_up(query):
             return True
         if _is_update_intent(rules_intent):

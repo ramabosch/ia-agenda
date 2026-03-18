@@ -38,6 +38,14 @@ def get_all_tasks():
         db.close()
 
 
+def get_all_tasks_with_relations():
+    db = SessionLocal()
+    try:
+        return task_repository.get_all_tasks_with_relations(db)
+    finally:
+        db.close()
+
+
 def get_tasks_by_project(project_id: int):
     db = SessionLocal()
     try:
@@ -387,3 +395,108 @@ def _resolve_relative_priority(current_priority: str, priority_direction: str | 
 
     current_index = ordered.index(current_priority)
     return ordered[min(current_index + 1, len(ordered) - 1)]
+
+
+def get_executive_task_snapshot(today: date | None = None) -> dict:
+    today = today or date.today()
+    tasks = get_all_tasks_with_relations()
+
+    items = [_serialize_task_for_executive(task, today) for task in tasks]
+    open_items = [item for item in items if item["status"] != "hecha"]
+    blocked_items = [item for item in open_items if item["status"] == "bloqueada"]
+    urgent_items = [item for item in open_items if item["is_urgent"]]
+    overdue_items = [item for item in open_items if item["is_overdue"]]
+
+    ranked_items = sorted(open_items, key=_task_rank_key)
+
+    return {
+        "today": today.isoformat(),
+        "tasks": items,
+        "open_tasks": open_items,
+        "blocked_tasks": blocked_items,
+        "urgent_tasks": urgent_items,
+        "overdue_tasks": overdue_items,
+        "recommended_tasks": ranked_items[:5],
+        "heuristic": [
+            "bloqueadas primero",
+            "despues vencidas o para hoy",
+            "despues prioridad alta",
+            "despues en progreso",
+            "despues pendientes relevantes",
+        ],
+    }
+
+
+def _serialize_task_for_executive(task, today: date) -> dict:
+    project = task.project
+    client = project.client if project else None
+    due_date = task.due_date
+    status = task.status
+    priority = task.priority
+    is_open = status != "hecha"
+    is_blocked = status == "bloqueada"
+    is_high_priority = priority == TaskPriority.HIGH.value
+    is_in_progress = status == "en_progreso"
+    is_due_today = bool(due_date and due_date == today and is_open)
+    is_overdue = bool(due_date and due_date < today and is_open)
+    is_urgent = is_blocked or is_overdue or is_due_today or is_high_priority
+
+    return {
+        "task_id": task.id,
+        "title": task.title,
+        "status": status,
+        "priority": priority,
+        "due_date": str(due_date) if due_date else None,
+        "last_note": task.last_note,
+        "next_action": task.next_action,
+        "project_id": project.id if project else None,
+        "project_name": project.name if project else "Sin proyecto",
+        "client_id": client.id if client else None,
+        "client_name": client.name if client else "Desconocido",
+        "is_blocked": is_blocked,
+        "is_due_today": is_due_today,
+        "is_overdue": is_overdue,
+        "is_high_priority": is_high_priority,
+        "is_in_progress": is_in_progress,
+        "is_urgent": is_urgent,
+        "score": _task_priority_score(
+            is_blocked=is_blocked,
+            is_overdue=is_overdue,
+            is_due_today=is_due_today,
+            is_high_priority=is_high_priority,
+            is_in_progress=is_in_progress,
+        ),
+    }
+
+
+def _task_priority_score(
+    *,
+    is_blocked: bool,
+    is_overdue: bool,
+    is_due_today: bool,
+    is_high_priority: bool,
+    is_in_progress: bool,
+) -> int:
+    score = 0
+    if is_blocked:
+        score += 100
+    if is_overdue:
+        score += 80
+    if is_due_today:
+        score += 60
+    if is_high_priority:
+        score += 40
+    if is_in_progress:
+        score += 20
+    return score
+
+
+def _task_rank_key(item: dict) -> tuple:
+    due_sort = item["due_date"] or "9999-12-31"
+    return (
+        -item["score"],
+        due_sort,
+        item["client_name"],
+        item["project_name"],
+        item["title"],
+    )

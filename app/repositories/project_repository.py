@@ -1,6 +1,7 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.db.models.project import Project
+from app.db.models.task import Task
 
 
 def create_project(db: Session, client_id: int, name: str, description: str | None = None) -> Project:
@@ -17,6 +18,15 @@ def get_projects_by_client(db: Session, client_id: int) -> list[Project]:
 
 def get_all_projects(db: Session) -> list[Project]:
     return db.query(Project).order_by(Project.id.desc()).all()
+
+
+def get_all_projects_with_tasks(db: Session) -> list[Project]:
+    return (
+        db.query(Project)
+        .options(joinedload(Project.client), joinedload(Project.tasks))
+        .order_by(Project.created_at.desc())
+        .all()
+    )
 
 
 def get_project_by_id(db: Session, project_id: int) -> Project | None:

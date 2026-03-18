@@ -31,6 +31,83 @@ def parse_user_query(query: str) -> dict:
 
 
 def _parse_read_intents(normalized: str) -> dict | None:
+    if any(
+        phrase in normalized
+        for phrase in [
+            "resumime lo mas importante del dia",
+            "lo mas importante del dia",
+        ]
+    ):
+        return {"intent": "get_general_executive_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que deberia hacer hoy",
+            "que hago hoy",
+            "que tengo que hacer hoy",
+        ]
+    ):
+        return {"intent": "get_today_priority_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que esta mas atrasado",
+            "que esta mas trabado",
+            "que esta atrasado",
+        ]
+    ):
+        return {"intent": "get_overdue_or_stuck_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que cliente necesita atencion primero",
+            "que cliente necesita mas atencion",
+        ]
+    ):
+        return {"intent": "get_client_attention_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que proyecto esta mas trabado",
+            "que proyecto necesita mas atencion",
+            "que proyecto esta peor",
+        ]
+    ):
+        return {"intent": "get_project_attention_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que tareas urgentes tengo abiertas",
+            "tareas urgentes abiertas",
+            "que urgente tengo abierto",
+        ]
+    ):
+        return {"intent": "get_today_priority_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que esta bloqueado",
+            "que hay bloqueado",
+        ]
+    ):
+        return {"intent": "get_blocked_items_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que sigue en general",
+            "y que sigue",
+            "y que es lo mas urgente",
+        ]
+    ):
+        return {"intent": "get_general_executive_summary"}
+
     if any(phrase in normalized for phrase in ["resumime el cliente", "decime el cliente", "mostrame el cliente"]):
         match = re.search(r"cliente\s+(.+)$", normalized)
         if match:

@@ -41,6 +41,15 @@ def get_all_tasks(db: Session) -> list[Task]:
     return db.query(Task).order_by(Task.id.desc()).all()
 
 
+def get_all_tasks_with_relations(db: Session) -> list[Task]:
+    return (
+        db.query(Task)
+        .options(joinedload(Task.project).joinedload(Project.client))
+        .order_by(Task.created_at.desc())
+        .all()
+    )
+
+
 def get_tasks_by_status(db: Session, status: str) -> list[Task]:
     return db.query(Task).filter(Task.status == status).order_by(Task.id.desc()).all()
 

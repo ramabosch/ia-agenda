@@ -14,12 +14,20 @@ from app.config import (
 ALLOWED_INTENTS = {
     "get_active_clients",
     "get_open_tasks_by_client_name",
+    "get_client_summary",
     "get_projects_by_client_name",
     "get_tasks_by_client_name",
     "get_tasks_by_project_name",
     "get_tasks_by_project_and_client",
+    "get_tasks_by_status",
     "get_task_summary",
     "get_project_summary",
+    "get_blocked_items_summary",
+    "get_today_priority_summary",
+    "get_overdue_or_stuck_summary",
+    "get_client_attention_summary",
+    "get_project_attention_summary",
+    "get_general_executive_summary",
     "update_task_status",
     "add_task_update",
     "add_task_note",
@@ -189,6 +197,125 @@ JSON:
   "next_action": "llamar manana",
   "last_note": null
 }
+
+Usuario: resumime el cliente Dallas
+JSON:
+{
+  "intent": "get_client_summary",
+  "client_name": "dallas",
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null
+}
+
+Usuario: y sus proyectos?
+JSON:
+{
+  "intent": "get_projects_by_client_name",
+  "client_name": "este cliente",
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null
+}
+
+Usuario: ponelo en alta
+JSON:
+{
+  "intent": "update_task_priority",
+  "client_name": null,
+  "project_name": null,
+  "task_name": "eso",
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": "alta",
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null
+}
+
+Usuario: que esta bloqueado
+JSON:
+{
+  "intent": "get_blocked_items_summary",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null
+}
+
+Usuario: que deberia hacer hoy
+JSON:
+{
+  "intent": "get_today_priority_summary",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null
+}
+
+Usuario: que cliente necesita atencion primero
+JSON:
+{
+  "intent": "get_client_attention_summary",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null
+}
+
+Usuario: que proyecto esta mas trabado
+JSON:
+{
+  "intent": "get_project_attention_summary",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null
+}
 """.strip()
 
 SYSTEM_PROMPT = f"""
@@ -212,12 +339,20 @@ Reglas:
 Intentos permitidos:
 - get_active_clients
 - get_open_tasks_by_client_name
+- get_client_summary
 - get_projects_by_client_name
 - get_tasks_by_client_name
 - get_tasks_by_project_name
 - get_tasks_by_project_and_client
+- get_tasks_by_status
 - get_task_summary
 - get_project_summary
+- get_blocked_items_summary
+- get_today_priority_summary
+- get_overdue_or_stuck_summary
+- get_client_attention_summary
+- get_project_attention_summary
+- get_general_executive_summary
 - update_task_status
 - add_task_update
 - add_task_note
@@ -375,9 +510,29 @@ def _coerce_semantics(payload: dict[str, Any], user_query: str) -> dict[str, Any
             else:
                 payload["intent"] = "unknown"
 
+    if intent in {
+        "get_blocked_items_summary",
+        "get_today_priority_summary",
+        "get_overdue_or_stuck_summary",
+        "get_client_attention_summary",
+        "get_project_attention_summary",
+        "get_general_executive_summary",
+    }:
+        payload["client_name"] = None
+        payload["project_name"] = None
+        payload["task_name"] = None
+
     if intent == "get_open_tasks_by_client_name":
         if client_name and not _mentions_open_only(q):
             payload["intent"] = "get_tasks_by_client_name"
+
+    if intent == "get_client_summary" and not client_name:
+        payload["intent"] = "unknown"
+
+    if intent == "get_tasks_by_status":
+        valid_statuses = {"pendiente", "en_progreso", "bloqueada", "hecha"}
+        if payload.get("new_status") not in valid_statuses:
+            payload["intent"] = "unknown"
 
     if intent == "get_tasks_by_project_and_client":
         if client_name and not project_name:
