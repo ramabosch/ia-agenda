@@ -27,6 +27,7 @@ from app.services.task_update_service import create_task_update
 
 
 REFERENCE_AWARE_INTENTS = {
+    "clarify_entity_reference",
     "get_open_tasks_by_client_name",
     "get_projects_by_client_name",
     "get_tasks_by_client_name",
@@ -81,6 +82,9 @@ def build_response_from_query(
 ) -> str:
     intent = parsed_query.get("intent")
     resolved_references = _resolve_if_needed(parsed_query, user_query, conversation_context=conversation_context)
+
+    if intent == "clarify_entity_reference":
+        return _handle_clarification_intent(parsed_query, resolved_references)
 
     if intent == "get_active_clients":
         clients = get_active_clients()
@@ -583,6 +587,51 @@ def _build_followup_scoped_response(parsed_query: dict, resolved_references: dic
     return None
 
 
+def _handle_clarification_intent(parsed_query: dict, resolved_references: dict) -> str:
+    if resolved_references.get("security_blocked"):
+        return _abort_with_context(
+            parsed_query,
+            "No tengo contexto aislado actual suficiente para interpretar esa referencia corta. Decime el cliente, proyecto o tarea exacta.",
+        )
+
+    if resolved_references.get("clarification_needed"):
+        return _abort_with_context(parsed_query, _build_clarification_response(resolved_references))
+
+    scope = resolved_references.get("scope")
+    if scope == "task" and resolved_references.get("task", {}).get("resolved"):
+        summary = get_task_operational_summary(resolved_references["task"]["resolved"]["id"])
+        if not summary:
+            return _abort_with_context(parsed_query, "Encontre la tarea, pero no pude cargar su resumen operativo.")
+        _remember_context_from_summary(parsed_query, summary, "task")
+        return _format_task_summary(summary)
+
+    if scope == "project" and resolved_references.get("project", {}).get("resolved"):
+        summary = get_project_operational_summary(resolved_references["project"]["resolved"]["id"])
+        if not summary:
+            return _abort_with_context(parsed_query, "Encontre el proyecto, pero no pude cargar su resumen operativo.")
+        _remember_context_from_project_summary(parsed_query, summary)
+        return _format_project_summary(summary)
+
+    if scope == "client" and resolved_references.get("client", {}).get("resolved"):
+        client = resolved_references["client"]["resolved"]
+        projects = get_projects_by_client_id(client["id"])
+        tasks = get_tasks_by_client_id(client["id"])
+        open_tasks = [task for task in tasks if task.status != "hecha"]
+        blocked_tasks = [task for task in tasks if task.status == "bloqueada"]
+        _remember_context(parsed_query, resolved_references, focus_scope="client", projects=projects)
+        return "\n".join(
+            [
+                f"Resumen del cliente {client['name']}:",
+                f"Proyectos: {len(projects)}",
+                f"Tareas totales: {len(tasks)}",
+                f"Tareas abiertas: {len(open_tasks)}",
+                f"Tareas bloqueadas: {len(blocked_tasks)}",
+            ]
+        )
+
+    return _abort_with_context(parsed_query, _build_clarification_response(resolved_references))
+
+
 def _format_scoped_followup_list(parsed_query: dict, *, scope: str, scope_name: str, tasks: list) -> str:
     items = _build_followup_items_from_tasks(tasks)
     open_items = [item for item in items if item["status"] != "hecha"]
@@ -1050,12 +1099,26 @@ def _build_followup_items_from_tasks(tasks: list) -> list[dict]:
 def _resolve_if_needed(parsed_query: dict, user_query: str | None, conversation_context: dict | None = None) -> dict:
     intent = parsed_query.get("intent")
     if intent not in REFERENCE_AWARE_INTENTS:
-        resolved = {"scope": "none", "confidence": 0.0, "ambiguous": False, "source": "none"}
+        resolved = {
+            "scope": "none",
+            "confidence": 0.0,
+            "ambiguous": False,
+            "source": "none",
+            "clarification_needed": False,
+            "clarification_reason": None,
+            "candidate_types": [],
+            "clarification_candidates": [],
+        }
         parsed_query["_resolved_references"] = resolved
         parsed_query["_resolver_scope"] = "none"
         parsed_query["_resolver_source"] = "none"
         parsed_query["_resolver_confidence"] = 0.0
         parsed_query["_resolver_ambiguous"] = False
+        parsed_query["_clarification_needed"] = False
+        parsed_query["_clarification_reason"] = None
+        parsed_query["_clarification_candidates"] = []
+        parsed_query["_candidate_types"] = []
+        parsed_query["_used_context_to_disambiguate"] = False
         parsed_query["_recent_context_used"] = {}
         parsed_query["_context_source"] = "none"
         parsed_query["_context_isolated"] = False
@@ -1074,6 +1137,11 @@ def _resolve_if_needed(parsed_query: dict, user_query: str | None, conversation_
     parsed_query["_resolver_source"] = resolved.get("source")
     parsed_query["_resolver_confidence"] = resolved.get("confidence")
     parsed_query["_resolver_ambiguous"] = resolved.get("ambiguous")
+    parsed_query["_clarification_needed"] = resolved.get("clarification_needed", False)
+    parsed_query["_clarification_reason"] = resolved.get("clarification_reason")
+    parsed_query["_clarification_candidates"] = resolved.get("clarification_candidates", [])
+    parsed_query["_candidate_types"] = resolved.get("candidate_types", [])
+    parsed_query["_used_context_to_disambiguate"] = resolved.get("used_context_to_disambiguate", False)
     parsed_query["_recent_context_used"] = resolved.get("context", {})
     parsed_query["_context_source"] = resolved.get("context_source", "none")
     parsed_query["_context_isolated"] = resolved.get("context_isolated", False)
@@ -1090,7 +1158,10 @@ def _require_resolved_entity(resolved_references: dict, scope: str, label: str, 
         return f"No pude identificar con seguridad que {label} queres {action_text} en esta conversacion actual."
 
     if result.get("ambiguous"):
-        return _format_ambiguity_message(f"Encontre varios {label}s posibles para {action_text}.", result.get("matches", []))
+        return _build_clarification_response(
+            resolved_references,
+            prefix=f"Encontre varios {label}s posibles para {action_text}.",
+        )
 
     if resolved is not None:
         return None
@@ -1106,6 +1177,34 @@ def _require_resolved_entity(resolved_references: dict, scope: str, label: str, 
         return f"Tenia contexto previo para ese {label}, pero no pude reutilizarlo con confianza."
 
     return f"No pude identificar a que {label} te referis."
+
+
+def _build_clarification_response(resolved_references: dict, prefix: str | None = None) -> str:
+    reason = resolved_references.get("clarification_reason")
+    candidates = resolved_references.get("clarification_candidates") or []
+
+    if reason == "missing_context":
+        return "No tengo contexto aislado actual suficiente para resolver esa referencia. Decime el cliente, proyecto o tarea exacta."
+
+    if reason == "generic_request":
+        return (
+            "Necesito un poco mas de precision para saber a que te referis.\n"
+            "Decime si queres ver un cliente, un proyecto o una tarea concreta."
+        )
+
+    if not candidates:
+        return (
+            "No pude identificar una entidad clara con esa referencia.\n"
+            "Proba con el nombre del cliente, proyecto o tarea exacta."
+        )
+
+    lines = [prefix or "Necesito que me aclares a que te referis."]
+    lines.append("Vi estas coincidencias posibles:")
+    for item in candidates[:6]:
+        lines.append(f"- {item['name']} ({_scope_label(item['scope'])})")
+    lines.append("")
+    lines.append("Si queres, te lo puedo resumir, actualizar o mostrar proximos pasos del que elijas.")
+    return "\n".join(lines)
 
 
 def _format_ambiguity_message(prefix: str, matches: list[dict]) -> str:
@@ -1158,6 +1257,14 @@ def _is_next_step_query(user_query: str | None) -> bool:
         return False
     normalized = user_query.strip().lower()
     return "que sigue" in normalized or "proximo paso" in normalized or "hacer ahora" in normalized
+
+
+def _scope_label(scope: str) -> str:
+    return {
+        "client": "cliente",
+        "project": "proyecto",
+        "task": "tarea",
+    }.get(scope, scope)
 
 
 def _abort_with_context(parsed_query: dict, message: str) -> str:

@@ -68,6 +68,24 @@ class UpdateSafetyTests(unittest.TestCase):
         update_mock.assert_called_once()
         self.assertTrue(parsed.get("_update_real"))
 
+    def test_ambiguous_open_update_request_does_not_update(self):
+        client = make_client(1, "CAM")
+        project = make_project(10, "Dashboard", client)
+        task = make_task(101, "Dashboard indicadores", project)
+        parsed = parse_user_query("actualiza dashboard")
+
+        with patch("app.services.reference_resolver.get_all_projects", return_value=[project]), patch(
+            "app.services.reference_resolver.get_all_tasks",
+            return_value=[task],
+        ), patch(
+            "app.services.query_response_service.update_task_status_conversational"
+        ) as update_mock:
+            response = build_response_from_query(parsed, user_query="actualiza dashboard", conversation_context={})
+
+        self.assertIn("aclares", response.lower())
+        self.assertIn("dashboard", response.lower())
+        update_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

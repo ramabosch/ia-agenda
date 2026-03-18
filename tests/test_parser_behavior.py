@@ -46,6 +46,17 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(close_task["intent"], "update_task_status")
         self.assertEqual(close_task["task_name"], "eso")
 
+    def test_parse_open_ambiguous_inputs_as_clarification(self):
+        dashboard = parse_user_query("dashboard")
+        view_cam = parse_user_query("quiero ver Cam")
+        summary_dashboard = parse_user_query("resumime lo del dashboard")
+        self.assertEqual(dashboard["intent"], "clarify_entity_reference")
+        self.assertEqual(dashboard["entity_hint"], "dashboard")
+        self.assertEqual(view_cam["intent"], "clarify_entity_reference")
+        self.assertEqual(view_cam["entity_hint"], "cam")
+        self.assertEqual(summary_dashboard["intent"], "clarify_entity_reference")
+        self.assertEqual(summary_dashboard["entity_hint"], "dashboard")
+
     def test_hybrid_prefers_rules_for_short_updates(self):
         llm_result = {
             "intent": "get_task_summary",

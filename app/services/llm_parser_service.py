@@ -32,6 +32,7 @@ ALLOWED_INTENTS = {
     "get_missing_next_actions_summary",
     "get_followup_needed_summary",
     "get_push_today_summary",
+    "clarify_entity_reference",
     "update_task_status",
     "add_task_update",
     "add_task_note",
@@ -61,6 +62,7 @@ EMPTY_PAYLOAD = {
     "priority_direction": None,
     "next_action": None,
     "last_note": None,
+    "entity_hint": None,
 }
 
 EXAMPLES_BLOCK = """
@@ -388,6 +390,24 @@ JSON:
   "next_action": null,
   "last_note": null
 }
+
+Usuario: dashboard
+JSON:
+{
+  "intent": "clarify_entity_reference",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null,
+  "entity_hint": "dashboard"
+}
 """.strip()
 
 SYSTEM_PROMPT = f"""
@@ -429,6 +449,7 @@ Intentos permitidos:
 - get_missing_next_actions_summary
 - get_followup_needed_summary
 - get_push_today_summary
+- clarify_entity_reference
 - update_task_status
 - add_task_update
 - add_task_note
@@ -457,7 +478,8 @@ Schema exacto:
   "new_priority": null,
   "priority_direction": null,
   "next_action": null,
-  "last_note": null
+  "last_note": null,
+  "entity_hint": null
 }}
 
 {EXAMPLES_BLOCK}
@@ -538,6 +560,7 @@ def _validate_payload_shape(payload: dict[str, Any]) -> dict[str, Any] | None:
     clean["priority_direction"] = _normalize_nullable_string(clean.get("priority_direction"))
     clean["next_action"] = _normalize_nullable_string(clean.get("next_action"))
     clean["last_note"] = _normalize_nullable_string(clean.get("last_note"))
+    clean["entity_hint"] = _normalize_nullable_string(clean.get("entity_hint"))
 
     clean["task_id"] = _normalize_int_or_none(clean.get("task_id"))
     clean["project_id"] = _normalize_int_or_none(clean.get("project_id"))
@@ -567,6 +590,17 @@ def _coerce_semantics(payload: dict[str, Any], user_query: str) -> dict[str, Any
     task_name = payload.get("task_name")
     task_id = payload.get("task_id")
     project_id = payload.get("project_id")
+
+    if intent == "clarify_entity_reference":
+        if not payload.get("entity_hint"):
+            payload["entity_hint"] = task_name or project_name or client_name
+        payload["client_name"] = None
+        payload["project_name"] = None
+        payload["task_name"] = None
+        payload["task_id"] = None
+        payload["project_id"] = None
+        if not payload.get("entity_hint"):
+            payload["intent"] = "unknown"
 
     if intent == "get_task_summary":
         if not task_id and not task_name:

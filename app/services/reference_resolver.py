@@ -45,6 +45,7 @@ TASK_CONTEXT_HINTS = {
     "agregale",
     "subile",
 }
+GENERIC_HINTS = {"cliente", "proyecto", "tarea", "eso", "esto", "algo", "lo del cliente"}
 FOLLOW_UP_MARKERS = (
     " y ",
     "ponelo",
@@ -72,6 +73,8 @@ def resolve_references(
 ) -> dict[str, Any]:
     context = _normalize_context(conversation_context)
     context_source = "current" if context else "none"
+    entity_hint = parsed_query.get("entity_hint")
+    intent = parsed_query.get("intent")
 
     if not context and allow_global_context:
         context = _load_conversation_context()
@@ -82,7 +85,7 @@ def resolve_references(
     missing_safe_context = follow_up_mode and _query_requires_context(user_query) and not context
 
     client_result = _resolve_client_reference(
-        parsed_query.get("client_name"),
+        _raw_reference_for_scope(parsed_query, "client", entity_hint, context),
         user_query=user_query,
         context=context,
         follow_up_mode=follow_up_mode,
@@ -94,7 +97,7 @@ def resolve_references(
 
     client_id = _resolved_id(client_result)
     project_result = _resolve_project_reference(
-        parsed_query.get("project_name"),
+        _raw_reference_for_scope(parsed_query, "project", entity_hint, context),
         client_id=client_id,
         user_query=user_query,
         context=context,
@@ -112,9 +115,9 @@ def resolve_references(
         client_id = project_entity.client.id
 
     task_result = _resolve_task_reference(
-        parsed_query.get("task_name"),
-        client_id=client_id,
-        project_id=project_id,
+        _raw_reference_for_scope(parsed_query, "task", entity_hint, context),
+        client_id=None if intent == "clarify_entity_reference" else client_id,
+        project_id=None if intent == "clarify_entity_reference" else project_id,
         user_query=user_query,
         context=context,
         follow_up_mode=follow_up_mode,
@@ -143,6 +146,21 @@ def resolve_references(
         0.0,
     )
     ambiguous = any(result["ambiguous"] for result in (client_result, project_result, task_result))
+    candidate_types = [
+        scope
+        for scope, result in (("client", client_result), ("project", project_result), ("task", task_result))
+        if result["matches"] and result.get("source") != "derived"
+    ]
+    clarification_candidates = _build_clarification_candidates(client_result, project_result, task_result)
+    clarification_needed, clarification_reason = _detect_clarification_need(
+        intent=intent,
+        entity_hint=entity_hint,
+        context=context,
+        missing_safe_context=missing_safe_context,
+        client_result=client_result,
+        project_result=project_result,
+        task_result=task_result,
+    )
 
     serialized_client = _serialize_result(client_result)
     serialized_project = _serialize_result(project_result)
@@ -153,6 +171,10 @@ def resolve_references(
         "source": _infer_source([serialized_client, serialized_project, serialized_task]),
         "confidence": round(confidence, 3),
         "ambiguous": ambiguous,
+        "clarification_needed": clarification_needed,
+        "clarification_reason": clarification_reason,
+        "candidate_types": candidate_types,
+        "clarification_candidates": clarification_candidates,
         "client": serialized_client,
         "project": serialized_project,
         "task": serialized_task,
@@ -176,6 +198,15 @@ def resolve_references(
             "project": serialized_project["source"] == "contextual",
             "task": serialized_task["source"] == "contextual",
         },
+        "used_context_to_disambiguate": bool(context) and not clarification_needed and any(
+            item["source"] in {"contextual", "mixed"} for item in (serialized_client, serialized_project, serialized_task)
+        ) or (
+            bool(context)
+            and intent == "clarify_entity_reference"
+            and ((entity_hint or "").strip().lower() in GENERIC_HINTS or normalize_entity_text(entity_hint) in GENERIC_HINTS)
+            and not clarification_needed
+            and scope != "none"
+        ),
     }
 
 
@@ -370,6 +401,24 @@ def _coerce_context_reference(
     return raw_name
 
 
+def _raw_reference_for_scope(
+    parsed_query: dict[str, Any],
+    scope: str,
+    entity_hint: str | None,
+    context: dict[str, Any],
+) -> str | None:
+    explicit = parsed_query.get(f"{scope}_name")
+    if explicit:
+        return explicit
+    if parsed_query.get("intent") == "clarify_entity_reference":
+        raw_hint = (entity_hint or "").strip().lower()
+        normalized_hint = normalize_entity_text(entity_hint)
+        if (raw_hint in GENERIC_HINTS or normalized_hint in GENERIC_HINTS) and context.get("scope") == scope and context.get(scope, {}).get("name"):
+            return context[scope]["name"]
+        return entity_hint
+    return None
+
+
 def _looks_like_context_reference(raw_name: str, scope: str) -> bool:
     raw_value = raw_name.strip().lower()
     if scope == "client":
@@ -548,6 +597,57 @@ def _serialize_result(result: dict[str, Any]) -> dict[str, Any]:
         "resolved": _strip_entity(resolved) if resolved else None,
         "matches": result["matches"],
     }
+
+
+def _build_clarification_candidates(*results: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for result in results:
+        if result.get("source") == "derived":
+            continue
+        for match in result["matches"][:3]:
+            key = (match["scope"], match["id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(match)
+    candidates.sort(key=lambda item: (-item["confidence"], item["scope"], item["name"]))
+    return candidates[:6]
+
+
+def _detect_clarification_need(
+    *,
+    intent: str | None,
+    entity_hint: str | None,
+    context: dict[str, Any],
+    missing_safe_context: bool,
+    client_result: dict[str, Any],
+    project_result: dict[str, Any],
+    task_result: dict[str, Any],
+) -> tuple[bool, str | None]:
+    results = {"client": client_result, "project": project_result, "task": task_result}
+    matched_scopes = [scope for scope, result in results.items() if result["matches"] and result.get("source") != "derived"]
+    resolved_scopes = [scope for scope, result in results.items() if result["resolved"] is not None and result.get("source") != "derived"]
+
+    if missing_safe_context:
+        return True, "missing_context"
+
+    if any(result["ambiguous"] for result in results.values()):
+        return True, "ambiguous_matches"
+
+    if intent == "clarify_entity_reference":
+        raw_hint = (entity_hint or "").strip().lower()
+        normalized_hint = normalize_entity_text(entity_hint)
+        if not normalized_hint and raw_hint not in GENERIC_HINTS:
+            return True, "generic_request"
+        if (raw_hint in GENERIC_HINTS or normalized_hint in GENERIC_HINTS) and not resolved_scopes:
+            return True, "generic_request"
+        if len(matched_scopes) > 1 or len(resolved_scopes) > 1:
+            return True, "cross_scope_ambiguity"
+        if not matched_scopes:
+            return True, "missing_entity"
+
+    return False, None
 
 
 def _resolve_source(raw_name: str | None, resolved_name: str, follow_up_mode: bool, context_item: dict[str, Any] | None) -> str:

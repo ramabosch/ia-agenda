@@ -52,6 +52,30 @@ class ResolverBehaviorTests(unittest.TestCase):
 
         self.assertTrue(resolved["task"]["ambiguous"])
         self.assertIsNone(resolved["task"]["resolved"])
+        self.assertTrue(resolved["clarification_needed"])
+
+    def test_cross_scope_matches_trigger_clarification(self):
+        client = make_client(1, "CAM")
+        project = make_project(10, "Dashboard", client)
+        task = make_task(101, "Dashboard KPIs", project)
+
+        with patch("app.services.reference_resolver.get_all_projects", return_value=[project]), patch(
+            "app.services.reference_resolver.get_all_tasks",
+            return_value=[task],
+        ), patch(
+            "app.services.reference_resolver.get_all_clients",
+            return_value=[client],
+        ):
+            resolved = resolve_references(
+                {"intent": "clarify_entity_reference", "entity_hint": "dashboard"},
+                user_query="dashboard",
+                conversation_context={},
+            )
+
+        self.assertTrue(resolved["clarification_needed"])
+        self.assertEqual(resolved["clarification_reason"], "cross_scope_ambiguity")
+        self.assertIn("project", resolved["candidate_types"])
+        self.assertIn("task", resolved["candidate_types"])
 
     def test_uses_isolated_recent_context(self):
         client = make_client(2, "Dallas")
@@ -114,6 +138,15 @@ class ResolverBehaviorTests(unittest.TestCase):
 
         self.assertEqual(read_resolved["task"]["resolved"]["id"], 100)
         self.assertIsNone(update_resolved["task"]["resolved"])
+
+    def test_generic_open_reference_requests_precision(self):
+        resolved = resolve_references(
+            {"intent": "clarify_entity_reference", "entity_hint": "cliente"},
+            user_query="lo del cliente",
+            conversation_context={},
+        )
+        self.assertTrue(resolved["clarification_needed"])
+        self.assertEqual(resolved["clarification_reason"], "generic_request")
 
 
 if __name__ == "__main__":

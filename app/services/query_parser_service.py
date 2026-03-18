@@ -17,17 +17,68 @@ PRIORITY_WORDS = ("alta", "media", "baja")
 CONTEXT_TASK_NAMES = ("esta tarea", "esa tarea", "tarea actual")
 CONTEXT_PROJECT_NAMES = ("este proyecto", "ese proyecto", "proyecto actual")
 CONTEXT_CLIENT_NAMES = ("este cliente", "ese cliente", "cliente actual")
+OPEN_ENTITY_TERMS = {
+    "dashboard",
+    "onboarding",
+    "cam",
+    "indicadores",
+}
+GENERIC_ENTITY_TERMS = {
+    "cliente",
+    "proyecto",
+    "tarea",
+    "eso",
+    "esto",
+    "algo",
+}
 
 
 def parse_user_query(query: str) -> dict:
     normalized = query.strip().lower()
 
     result = (
-        _parse_read_intents(normalized)
+        _parse_ambiguity_intents(normalized)
+        or _parse_read_intents(normalized)
         or _parse_task_update_intents(normalized)
         or _parse_today_intents(normalized)
     )
     return result or {"intent": "unknown"}
+
+
+def _parse_ambiguity_intents(normalized: str) -> dict | None:
+    if not normalized:
+        return None
+
+    match = re.search(r"^resumime\s+lo\s+(?:del|de la|de)\s+(.+)$", normalized)
+    if match:
+        return {"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()}
+
+    match = re.search(r"^lo\s+(?:del|de la|de)\s+(.+)$", normalized)
+    if match:
+        return {"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()}
+
+    match = re.search(r"^que\s+pasa\s+con\s+(.+)$", normalized)
+    if match:
+        return {"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()}
+
+    match = re.search(r"^quiero\s+ver\s+(.+)$", normalized)
+    if match:
+        return {"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()}
+
+    match = re.search(r"^actualiza\s+(.+)$", normalized)
+    if match:
+        return {"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()}
+
+    match = re.search(r"^quiero\s+avanzar\s+con\s+(.+)$", normalized)
+    if match:
+        return {"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()}
+
+    words = [token for token in normalized.replace("?", "").split() if token]
+    if len(words) <= 2 and normalized not in {"cerrala", "cerralo"}:
+        if normalized in OPEN_ENTITY_TERMS or (len(words) == 1 and len(words[0]) >= 3):
+            return {"intent": "clarify_entity_reference", "entity_hint": normalized}
+
+    return None
 
 
 def _parse_read_intents(normalized: str) -> dict | None:

@@ -15,6 +15,10 @@ EXECUTIVE_INTENTS = {
     "get_push_today_summary",
 }
 
+CLARIFICATION_INTENTS = {
+    "clarify_entity_reference",
+}
+
 
 def parse_user_query_hybrid(query: str) -> dict:
     rules_result = parse_user_query_rules(query)
@@ -50,6 +54,8 @@ def _should_prefer_rules(query: str, rules_result: dict, llm_result: dict | None
     if rules_intent not in (None, "", "unknown"):
         if rules_intent in EXECUTIVE_INTENTS:
             return True
+        if rules_intent in CLARIFICATION_INTENTS:
+            return True
         if _is_short_or_follow_up(query):
             return True
         if _is_update_intent(rules_intent):
@@ -63,6 +69,9 @@ def _should_prefer_rules(query: str, rules_result: dict, llm_result: dict | None
         return True
 
     if llm_result and _is_contextual_result(llm_result) and rules_intent in (None, "", "unknown"):
+        return True
+
+    if llm_intent in CLARIFICATION_INTENTS and rules_intent in (None, "", "unknown") and _is_short_or_follow_up(query):
         return True
 
     return False
