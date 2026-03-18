@@ -29,6 +29,15 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(blocked["intent"], "get_blocked_items_summary")
         self.assertEqual(today["intent"], "get_today_priority_summary")
 
+    def test_parse_followup_queries(self):
+        client_followup = parse_user_query("que sigue para este cliente")
+        missing_next = parse_user_query("que tareas no tienen proxima accion")
+        push_today = parse_user_query("que deberia empujar hoy si o si")
+        self.assertEqual(client_followup["intent"], "get_next_actions_summary")
+        self.assertEqual(client_followup["client_name"], "este cliente")
+        self.assertEqual(missing_next["intent"], "get_missing_next_actions_summary")
+        self.assertEqual(push_today["intent"], "get_push_today_summary")
+
     def test_parse_contextual_followups(self):
         projects = parse_user_query("y sus proyectos?")
         close_task = parse_user_query("cerrala")
@@ -52,4 +61,3 @@ class ParserBehaviorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

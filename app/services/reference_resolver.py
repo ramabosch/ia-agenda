@@ -385,7 +385,10 @@ def _query_allows_task_context(user_query: str | None) -> bool:
     if not user_query:
         return False
     raw_query = user_query.strip().lower()
-    return any(marker in raw_query for marker in TASK_CONTEXT_HINTS | {"la del", "la de"})
+    return any(
+        marker in raw_query
+        for marker in TASK_CONTEXT_HINTS | {"la del", "la de", "que sigue", "proximo paso", "hacer ahora"}
+    )
 
 
 def _is_follow_up_query(user_query: str | None) -> bool:

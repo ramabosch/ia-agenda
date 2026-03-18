@@ -34,6 +34,70 @@ def _parse_read_intents(normalized: str) -> dict | None:
     if any(
         phrase in normalized
         for phrase in [
+            "armame un resumen de proximos pasos",
+            "resumen de proximos pasos",
+        ]
+    ):
+        return {"intent": "get_next_actions_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que tareas no tienen proxima accion",
+            "que tareas no tienen next action",
+            "que esta frenado por falta de next action",
+        ]
+    ):
+        return {"intent": "get_missing_next_actions_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que quedo abierto sin seguimiento",
+            "que follow-ups tengo pendientes",
+            "que followups tengo pendientes",
+            "que habria que definir ahora",
+        ]
+    ):
+        return {"intent": "get_followup_needed_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que deberia empujar hoy si o si",
+            "que deberia empujar hoy",
+        ]
+    ):
+        return {"intent": "get_push_today_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que sigue para este cliente",
+            "que sigue para ese cliente",
+        ]
+    ):
+        client_name = "este cliente" if "este cliente" in normalized else "ese cliente"
+        return {"intent": "get_next_actions_summary", "client_name": client_name}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que sigue en este proyecto",
+            "que sigue en ese proyecto",
+        ]
+    ):
+        project_name = "este proyecto" if "este proyecto" in normalized else "ese proyecto"
+        return {"intent": "get_next_actions_summary", "project_name": project_name}
+
+    if normalized.startswith("que sigue para "):
+        target = normalized.removeprefix("que sigue para ").strip()
+        if target:
+            return {"intent": "get_next_actions_summary", "client_name": target}
+
+    if any(
+        phrase in normalized
+        for phrase in [
             "resumime lo mas importante del dia",
             "lo mas importante del dia",
         ]
@@ -103,10 +167,14 @@ def _parse_read_intents(normalized: str) -> dict | None:
         for phrase in [
             "que sigue en general",
             "y que sigue",
+            "y el proximo paso",
+            "y que habria que hacer ahora",
             "y que es lo mas urgente",
         ]
     ):
-        return {"intent": "get_general_executive_summary"}
+        if "urgente" in normalized:
+            return {"intent": "get_push_today_summary"}
+        return {"intent": "get_next_actions_summary"}
 
     if any(phrase in normalized for phrase in ["resumime el cliente", "decime el cliente", "mostrame el cliente"]):
         match = re.search(r"cliente\s+(.+)$", normalized)

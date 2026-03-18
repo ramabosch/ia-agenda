@@ -5,6 +5,7 @@ from app.services.conversation_service import (
 )
 from app.services.project_service import (
     get_executive_project_snapshot,
+    get_followup_project_snapshot,
     get_project_operational_summary,
     get_projects_by_client_id,
 )
@@ -12,6 +13,7 @@ from app.services.reference_resolver import resolve_references
 from app.services.task_service import (
     add_task_note_conversational,
     get_executive_task_snapshot,
+    get_followup_task_snapshot,
     get_open_tasks_by_client_id,
     get_task_operational_summary,
     get_tasks_by_client_id,
@@ -42,6 +44,7 @@ REFERENCE_AWARE_INTENTS = {
     "add_task_note",
     "update_task_next_action",
     "update_task_last_note",
+    "get_next_actions_summary",
 }
 
 TASK_UPDATE_INTENTS = {
@@ -61,6 +64,13 @@ EXECUTIVE_INTENTS = {
     "get_client_attention_summary",
     "get_project_attention_summary",
     "get_general_executive_summary",
+}
+
+FOLLOWUP_INTENTS = {
+    "get_next_actions_summary",
+    "get_missing_next_actions_summary",
+    "get_followup_needed_summary",
+    "get_push_today_summary",
 }
 
 
@@ -85,6 +95,9 @@ def build_response_from_query(
 
     if intent in EXECUTIVE_INTENTS:
         return _handle_executive_intent(parsed_query, user_query, conversation_context)
+
+    if intent in FOLLOWUP_INTENTS:
+        return _handle_followup_intent(parsed_query, resolved_references, user_query, conversation_context)
 
     if intent == "get_client_summary":
         client_message = _require_resolved_entity(resolved_references, "client", "cliente", action_text="resumir")
@@ -459,6 +472,147 @@ def _finalize_update_response(parsed_query: dict, resolved_references: dict, upd
     return f"Listo. Actualice la tarea '{result['task_title']}'. Cambio {field_labels.get(result['field'], result['field'])}: '{old_value}' -> '{new_value}'."
 
 
+def _handle_followup_intent(
+    parsed_query: dict,
+    resolved_references: dict,
+    user_query: str | None,
+    conversation_context: dict | None,
+) -> str:
+    if parsed_query.get("intent") == "get_next_actions_summary":
+        scoped_response = _build_followup_scoped_response(parsed_query, resolved_references)
+        if scoped_response:
+            return scoped_response
+
+        explicit_scope = None
+        if parsed_query.get("task_name"):
+            explicit_scope = ("task", "tarea", "seguir")
+        elif parsed_query.get("project_name"):
+            explicit_scope = ("project", "proyecto", "seguir")
+        elif parsed_query.get("client_name"):
+            explicit_scope = ("client", "cliente", "seguir")
+
+        if explicit_scope:
+            scope_key, label, action_text = explicit_scope
+            message = _require_resolved_entity(resolved_references, scope_key, label, action_text=action_text)
+            if message:
+                return _abort_with_context(parsed_query, message)
+
+        if resolved_references.get("security_blocked"):
+            return _abort_with_context(
+                parsed_query,
+                "No tengo contexto aislado actual para decirte que sigue con seguridad. Si queres, pedi un resumen global de proximos pasos.",
+            )
+
+    snapshot = get_followup_task_snapshot()
+    project_snapshot = get_followup_project_snapshot()
+    client_snapshot = _build_client_followup_snapshot(snapshot)
+
+    parsed_query["_followup_scope"] = "global"
+    parsed_query["_followup_heuristic"] = snapshot["heuristic"]
+    parsed_query["_followup_entities_with_next_action"] = [item["title"] for item in snapshot["tasks_with_next_action"][:3]]
+    parsed_query["_followup_entities_without_next_action"] = [item["title"] for item in snapshot["tasks_without_next_action"][:3]]
+    parsed_query["_followup_inference_used"] = False
+    parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
+
+    intent = parsed_query.get("intent")
+    if intent == "get_missing_next_actions_summary":
+        return _format_missing_next_actions_summary(snapshot, project_snapshot)
+    if intent == "get_followup_needed_summary":
+        return _format_followup_needed_summary(snapshot, project_snapshot, client_snapshot)
+    if intent == "get_push_today_summary":
+        return _format_push_today_summary(snapshot)
+    return _format_next_actions_summary(snapshot, project_snapshot, client_snapshot)
+
+
+def _build_followup_scoped_response(parsed_query: dict, resolved_references: dict) -> str | None:
+    scope = resolved_references.get("scope")
+
+    if scope == "task" and resolved_references.get("task", {}).get("resolved"):
+        summary = get_task_operational_summary(resolved_references["task"]["resolved"]["id"])
+        if not summary:
+            return _abort_with_context(parsed_query, "Encontre la tarea, pero no pude cargar su seguimiento.")
+
+        _remember_context_from_summary(parsed_query, summary, "task")
+        parsed_query["_followup_scope"] = "contextual_task"
+        parsed_query["_followup_heuristic"] = ["usa proxima accion explicita si existe", "si no existe, marca falta de seguimiento"]
+        parsed_query["_followup_entities_with_next_action"] = [summary["title"]] if summary.get("next_action") else []
+        parsed_query["_followup_entities_without_next_action"] = [] if summary.get("next_action") else [summary["title"]]
+        parsed_query["_followup_inference_used"] = False
+
+        if summary.get("next_action"):
+            return "\n".join(
+                [
+                    f"Lo que sigue con la tarea {summary['title']} es:",
+                    f"- Proximo paso: {summary['next_action']}",
+                    f"- Estado: {summary['status']}",
+                    f"- Prioridad: {summary['priority']}",
+                ]
+            )
+
+        return "\n".join(
+            [
+                f"La tarea {summary['title']} sigue abierta, pero no tiene proxima accion definida.",
+                f"- Estado: {summary['status']}",
+                f"- Prioridad: {summary['priority']}",
+                "- Falta seguimiento claro.",
+            ]
+        )
+
+    if scope == "project" and resolved_references.get("project", {}).get("resolved"):
+        project = resolved_references["project"]["resolved"]
+        tasks = get_tasks_by_project_id(project["id"])
+        _remember_context(parsed_query, resolved_references, focus_scope="project", tasks=tasks)
+        return _format_scoped_followup_list(
+            parsed_query,
+            scope="project",
+            scope_name=project["name"],
+            tasks=tasks,
+        )
+
+    if scope == "client" and resolved_references.get("client", {}).get("resolved"):
+        client = resolved_references["client"]["resolved"]
+        tasks = get_open_tasks_by_client_id(client["id"])
+        _remember_context(parsed_query, resolved_references, focus_scope="client", tasks=tasks)
+        return _format_scoped_followup_list(
+            parsed_query,
+            scope="client",
+            scope_name=client["name"],
+            tasks=tasks,
+        )
+
+    return None
+
+
+def _format_scoped_followup_list(parsed_query: dict, *, scope: str, scope_name: str, tasks: list) -> str:
+    items = _build_followup_items_from_tasks(tasks)
+    open_items = [item for item in items if item["status"] != "hecha"]
+
+    parsed_query["_followup_scope"] = f"contextual_{scope}"
+    parsed_query["_followup_heuristic"] = [
+        "prioriza bloqueadas sin proxima accion",
+        "despues abiertas urgentes sin seguimiento",
+        "despues acciones explicitas ya definidas",
+    ]
+    parsed_query["_followup_entities_with_next_action"] = [item["title"] for item in open_items if item["has_next_action"]][:3]
+    parsed_query["_followup_entities_without_next_action"] = [item["title"] for item in open_items if item["missing_next_action"]][:3]
+    parsed_query["_followup_inference_used"] = False
+
+    if not open_items:
+        if scope == "project":
+            return f"En el proyecto {scope_name} no hay tareas abiertas."
+        return f"Con {scope_name} no hay tareas abiertas."
+
+    header = (
+        f"Lo que sigue para el proyecto {scope_name}:"
+        if scope == "project"
+        else f"Lo que sigue para {scope_name}:"
+    )
+    lines = [header]
+    for item in open_items[:5]:
+        lines.append(_format_followup_item_line(item))
+    return "\n".join(lines)
+
+
 def _handle_executive_intent(parsed_query: dict, user_query: str | None, conversation_context: dict | None) -> str:
     context = conversation_context or {}
     if _should_use_contextual_executive_view(user_query, context):
@@ -590,6 +744,46 @@ def _build_client_attention_snapshot(task_snapshot: dict) -> dict:
     }
 
 
+def _build_client_followup_snapshot(task_snapshot: dict) -> dict:
+    clients: dict[int | str, dict] = {}
+    for item in task_snapshot["open_tasks"]:
+        client_id = item["client_id"] or item["client_name"]
+        if client_id not in clients:
+            clients[client_id] = {
+                "client_id": item["client_id"],
+                "client_name": item["client_name"],
+                "open_tasks": 0,
+                "tasks_with_next_action": 0,
+                "tasks_without_next_action": 0,
+                "blocked_without_next_action": 0,
+                "score": 0,
+            }
+
+        client = clients[client_id]
+        client["open_tasks"] += 1
+        client["tasks_with_next_action"] += int(item["has_next_action"])
+        client["tasks_without_next_action"] += int(item["missing_next_action"])
+        client["blocked_without_next_action"] += int(item["blocked_without_next_action"])
+
+    for client in clients.values():
+        client["score"] = (
+            client["blocked_without_next_action"] * 5
+            + client["tasks_without_next_action"] * 3
+            + client["open_tasks"]
+        )
+
+    ranked = sorted(clients.values(), key=lambda item: (-item["score"], item["client_name"]))
+    return {
+        "clients": list(clients.values()),
+        "prioritized_clients": ranked[:5],
+        "heuristic": [
+            "clientes con mas tareas sin seguimiento primero",
+            "prioriza bloqueos sin proxima accion",
+            "despues mayor carga abierta",
+        ],
+    }
+
+
 def _format_blocked_summary(task_snapshot: dict, project_snapshot: dict) -> str:
     blocked_tasks = task_snapshot["blocked_tasks"][:5]
     blocked_projects = [item for item in project_snapshot["prioritized_projects"] if item["blocked_tasks"] > 0][:3]
@@ -687,6 +881,110 @@ def _format_general_executive_summary(task_snapshot: dict, project_snapshot: dic
     return "\n".join(lines)
 
 
+def _format_next_actions_summary(task_snapshot: dict, project_snapshot: dict, client_snapshot: dict) -> str:
+    lines = ["Resumen de proximos pasos:"]
+
+    explicit_items = task_snapshot["tasks_with_next_action"][:3]
+    if explicit_items:
+        lines.append("Proximos pasos ya definidos:")
+        for item in explicit_items:
+            lines.append(_format_followup_item_line(item))
+
+    missing_items = task_snapshot["tasks_without_next_action"][:3]
+    if missing_items:
+        if explicit_items:
+            lines.append("")
+        lines.append("Abierto sin seguimiento claro:")
+        for item in missing_items:
+            lines.append(_format_followup_item_line(item))
+
+    if project_snapshot["prioritized_projects"]:
+        lines.append("")
+        lines.append("Proyectos a ordenar:")
+        for item in project_snapshot["prioritized_projects"][:3]:
+            if item["tasks_without_next_action"] <= 0:
+                continue
+            lines.append(
+                f"- {item['project_name']} ({item['client_name']}) | Sin proxima accion: {item['tasks_without_next_action']} | Abiertas: {item['open_tasks']}"
+            )
+
+    if client_snapshot["prioritized_clients"]:
+        top_client = client_snapshot["prioritized_clients"][0]
+        lines.append("")
+        lines.append(
+            f"Cliente mas expuesto por falta de seguimiento: {top_client['client_name']} ({top_client['tasks_without_next_action']} abiertas sin proxima accion)."
+        )
+
+    return "\n".join(lines)
+
+
+def _format_missing_next_actions_summary(task_snapshot: dict, project_snapshot: dict) -> str:
+    missing_items = task_snapshot["tasks_without_next_action"][:5]
+    if not missing_items:
+        return "No encontre tareas abiertas sin proxima accion definida."
+
+    lines = ["Estas tareas abiertas no tienen proxima accion definida:"]
+    for item in missing_items:
+        lines.append(_format_followup_item_line(item))
+
+    risky_projects = [item for item in project_snapshot["prioritized_projects"] if item["tasks_without_next_action"] > 0][:3]
+    if risky_projects:
+        lines.append("")
+        lines.append("Proyectos con mas falta de seguimiento:")
+        for item in risky_projects:
+            lines.append(
+                f"- {item['project_name']} ({item['client_name']}) | Sin proxima accion: {item['tasks_without_next_action']}"
+            )
+    return "\n".join(lines)
+
+
+def _format_followup_needed_summary(task_snapshot: dict, project_snapshot: dict, client_snapshot: dict) -> str:
+    followup_items = task_snapshot["followup_needed_tasks"][:5]
+    if not followup_items:
+        return "No encontre follow-ups pendientes claros en este momento."
+
+    lines = ["Esto quedo abierto y necesita seguimiento:"]
+    for item in followup_items:
+        lines.append(_format_followup_item_line(item))
+
+    risky_projects = [item for item in project_snapshot["prioritized_projects"] if item["blocked_without_next_action"] > 0][:3]
+    if risky_projects:
+        lines.append("")
+        lines.append("Proyectos mas frenados por falta de seguimiento:")
+        for item in risky_projects:
+            lines.append(
+                f"- {item['project_name']} ({item['client_name']}) | Bloqueadas sin proxima accion: {item['blocked_without_next_action']}"
+            )
+
+    risky_clients = [item for item in client_snapshot["prioritized_clients"] if item["tasks_without_next_action"] > 0][:2]
+    if risky_clients:
+        lines.append("")
+        lines.append("Clientes con trabajo abierto sin seguimiento:")
+        for item in risky_clients:
+            lines.append(
+                f"- {item['client_name']} | Sin proxima accion: {item['tasks_without_next_action']} | Abiertas: {item['open_tasks']}"
+            )
+    return "\n".join(lines)
+
+
+def _format_push_today_summary(task_snapshot: dict) -> str:
+    push_items = task_snapshot["push_today_tasks"][:5]
+    if not push_items:
+        return "No encontre tareas abiertas para empujar hoy."
+
+    lines = ["Esto deberias empujar hoy si o si:"]
+    for item in push_items:
+        lines.append(_format_followup_item_line(item))
+    return "\n".join(lines)
+
+
+def _format_followup_item_line(item: dict) -> str:
+    base = f"- {item['title']} | Cliente: {item['client_name']} | Proyecto: {item['project_name']}"
+    if item["has_next_action"]:
+        return f"{base} | Proximo paso: {item['next_action']}"
+    return f"{base} | Falta definir proxima accion"
+
+
 def _task_reason_label(item: dict) -> str:
     reasons = []
     if item["is_blocked"]:
@@ -708,6 +1006,45 @@ def _task_sort_tuple(task) -> tuple:
     high = 1 if task.priority == "alta" else 0
     progress = 1 if task.status == "en_progreso" else 0
     return (-blocked, due, -high, -progress, task.title)
+
+
+def _build_followup_items_from_tasks(tasks: list) -> list[dict]:
+    items = []
+    for task in tasks:
+        if task.status == "hecha":
+            continue
+
+        next_action = (task.next_action or "").strip() or None
+        is_blocked = task.status == "bloqueada"
+        is_high_priority = task.priority == "alta"
+        missing_next_action = not next_action
+        item = {
+            "title": task.title,
+            "status": task.status,
+            "priority": task.priority,
+            "project_name": task.project.name if task.project else "Sin proyecto",
+            "client_name": task.project.client.name if task.project and task.project.client else "Desconocido",
+            "next_action": next_action,
+            "has_next_action": bool(next_action),
+            "missing_next_action": missing_next_action,
+            "blocked_without_next_action": is_blocked and missing_next_action,
+            "high_priority_without_next_action": is_high_priority and missing_next_action,
+            "is_urgent": is_blocked or is_high_priority,
+            "due_date": str(task.due_date) if task.due_date else None,
+        }
+        items.append(item)
+
+    return sorted(
+        items,
+        key=lambda item: (
+            -int(item["blocked_without_next_action"]),
+            -int(item["high_priority_without_next_action"]),
+            -int(item["missing_next_action"]),
+            -int(item["is_urgent"] and item["has_next_action"]),
+            item["due_date"] or "9999-12-31",
+            item["title"],
+        ),
+    )
 
 
 def _resolve_if_needed(parsed_query: dict, user_query: str | None, conversation_context: dict | None = None) -> dict:
@@ -820,7 +1157,7 @@ def _is_next_step_query(user_query: str | None) -> bool:
     if not user_query:
         return False
     normalized = user_query.strip().lower()
-    return "que sigue" in normalized
+    return "que sigue" in normalized or "proximo paso" in normalized or "hacer ahora" in normalized
 
 
 def _abort_with_context(parsed_query: dict, message: str) -> str:

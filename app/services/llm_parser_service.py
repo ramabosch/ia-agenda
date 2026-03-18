@@ -28,6 +28,10 @@ ALLOWED_INTENTS = {
     "get_client_attention_summary",
     "get_project_attention_summary",
     "get_general_executive_summary",
+    "get_next_actions_summary",
+    "get_missing_next_actions_summary",
+    "get_followup_needed_summary",
+    "get_push_today_summary",
     "update_task_status",
     "add_task_update",
     "add_task_note",
@@ -316,6 +320,74 @@ JSON:
   "next_action": null,
   "last_note": null
 }
+
+Usuario: que sigue para este cliente
+JSON:
+{
+  "intent": "get_next_actions_summary",
+  "client_name": "este cliente",
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null
+}
+
+Usuario: que tareas no tienen proxima accion
+JSON:
+{
+  "intent": "get_missing_next_actions_summary",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null
+}
+
+Usuario: que quedo abierto sin seguimiento
+JSON:
+{
+  "intent": "get_followup_needed_summary",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null
+}
+
+Usuario: que deberia empujar hoy si o si
+JSON:
+{
+  "intent": "get_push_today_summary",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null
+}
 """.strip()
 
 SYSTEM_PROMPT = f"""
@@ -353,6 +425,10 @@ Intentos permitidos:
 - get_client_attention_summary
 - get_project_attention_summary
 - get_general_executive_summary
+- get_next_actions_summary
+- get_missing_next_actions_summary
+- get_followup_needed_summary
+- get_push_today_summary
 - update_task_status
 - add_task_update
 - add_task_note
@@ -517,6 +593,9 @@ def _coerce_semantics(payload: dict[str, Any], user_query: str) -> dict[str, Any
         "get_client_attention_summary",
         "get_project_attention_summary",
         "get_general_executive_summary",
+        "get_missing_next_actions_summary",
+        "get_followup_needed_summary",
+        "get_push_today_summary",
     }:
         payload["client_name"] = None
         payload["project_name"] = None

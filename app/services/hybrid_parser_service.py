@@ -9,6 +9,10 @@ EXECUTIVE_INTENTS = {
     "get_client_attention_summary",
     "get_project_attention_summary",
     "get_general_executive_summary",
+    "get_next_actions_summary",
+    "get_missing_next_actions_summary",
+    "get_followup_needed_summary",
+    "get_push_today_summary",
 }
 
 
@@ -78,6 +82,7 @@ def _is_short_or_follow_up(query: str) -> bool:
         "subile",
         "y en ese proyecto",
         "y sus proyectos",
+        "y el proximo paso",
         "ahi",
     )
     return len(words) <= 4 or any(marker in normalized for marker in markers)

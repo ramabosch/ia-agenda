@@ -427,12 +427,43 @@ def get_executive_task_snapshot(today: date | None = None) -> dict:
     }
 
 
+def get_followup_task_snapshot(today: date | None = None) -> dict:
+    today = today or date.today()
+    tasks = get_all_tasks_with_relations()
+
+    items = [_serialize_task_for_executive(task, today) for task in tasks]
+    open_items = [item for item in items if item["status"] != "hecha"]
+    with_next_action = [item for item in open_items if item["has_next_action"]]
+    without_next_action = [item for item in open_items if item["missing_next_action"]]
+    blocked_without_next_action = [item for item in open_items if item["blocked_without_next_action"]]
+    followup_needed = [item for item in open_items if item["needs_followup"]]
+    push_today = sorted(open_items, key=_followup_rank_key)
+
+    return {
+        "today": today.isoformat(),
+        "tasks": items,
+        "open_tasks": open_items,
+        "tasks_with_next_action": with_next_action,
+        "tasks_without_next_action": without_next_action,
+        "blocked_without_next_action": blocked_without_next_action,
+        "followup_needed_tasks": followup_needed,
+        "push_today_tasks": push_today[:5],
+        "heuristic": [
+            "bloqueadas sin proxima accion primero",
+            "despues urgentes o de alta prioridad sin seguimiento",
+            "despues tareas urgentes con proxima accion explicita",
+            "si falta next_action se marca falta de seguimiento",
+        ],
+    }
+
+
 def _serialize_task_for_executive(task, today: date) -> dict:
     project = task.project
     client = project.client if project else None
     due_date = task.due_date
     status = task.status
     priority = task.priority
+    next_action = (task.next_action or "").strip() or None
     is_open = status != "hecha"
     is_blocked = status == "bloqueada"
     is_high_priority = priority == TaskPriority.HIGH.value
@@ -440,6 +471,16 @@ def _serialize_task_for_executive(task, today: date) -> dict:
     is_due_today = bool(due_date and due_date == today and is_open)
     is_overdue = bool(due_date and due_date < today and is_open)
     is_urgent = is_blocked or is_overdue or is_due_today or is_high_priority
+    has_next_action = bool(next_action)
+    missing_next_action = is_open and not has_next_action
+    blocked_without_next_action = is_blocked and missing_next_action
+    high_priority_without_next_action = is_high_priority and missing_next_action
+    needs_followup = is_open and (
+        blocked_without_next_action
+        or high_priority_without_next_action
+        or (is_overdue and missing_next_action)
+        or (is_in_progress and missing_next_action)
+    )
 
     return {
         "task_id": task.id,
@@ -448,7 +489,7 @@ def _serialize_task_for_executive(task, today: date) -> dict:
         "priority": priority,
         "due_date": str(due_date) if due_date else None,
         "last_note": task.last_note,
-        "next_action": task.next_action,
+        "next_action": next_action,
         "project_id": project.id if project else None,
         "project_name": project.name if project else "Sin proyecto",
         "client_id": client.id if client else None,
@@ -459,6 +500,11 @@ def _serialize_task_for_executive(task, today: date) -> dict:
         "is_high_priority": is_high_priority,
         "is_in_progress": is_in_progress,
         "is_urgent": is_urgent,
+        "has_next_action": has_next_action,
+        "missing_next_action": missing_next_action,
+        "blocked_without_next_action": blocked_without_next_action,
+        "high_priority_without_next_action": high_priority_without_next_action,
+        "needs_followup": needs_followup,
         "score": _task_priority_score(
             is_blocked=is_blocked,
             is_overdue=is_overdue,
@@ -495,6 +541,21 @@ def _task_rank_key(item: dict) -> tuple:
     due_sort = item["due_date"] or "9999-12-31"
     return (
         -item["score"],
+        due_sort,
+        item["client_name"],
+        item["project_name"],
+        item["title"],
+    )
+
+
+def _followup_rank_key(item: dict) -> tuple:
+    due_sort = item["due_date"] or "9999-12-31"
+    return (
+        -int(item["blocked_without_next_action"]),
+        -int(item["is_overdue"] and item["missing_next_action"]),
+        -int(item["high_priority_without_next_action"]),
+        -int(item["missing_next_action"]),
+        -int(item["is_urgent"] and item["has_next_action"]),
         due_sort,
         item["client_name"],
         item["project_name"],
