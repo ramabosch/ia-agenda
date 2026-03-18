@@ -20,10 +20,17 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 $venvPython = Join-Path ".venv" "Scripts\python.exe"
+$pycacheRoot = Join-Path $env:TEMP "agenda_ai_pycache"
 
 if (-not (Test-Path $venvPython)) {
     throw "No existe .venv o no se encontró .\.venv\Scripts\python.exe. Corré primero el setup del entorno."
 }
+
+if (-not (Test-Path $pycacheRoot)) {
+    New-Item -ItemType Directory -Path $pycacheRoot | Out-Null
+}
+
+$env:PYTHONPYCACHEPREFIX = $pycacheRoot
 
 Run-Step "Compilando app" {
     & $venvPython -m compileall app

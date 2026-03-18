@@ -7,32 +7,40 @@ from app.services.query_response_service import build_response_from_query
 
 def render_conversation_page():
     st.title("Asistente conversacional (v1)")
+    st.session_state.setdefault("conversation_context", {})
 
-    st.write("Escribí una consulta sobre tu agenda operativa.")
+    st.write("Escribi una consulta sobre tu agenda operativa.")
 
-    with st.expander("Ejemplos de consultas que podés hacer"):
-        st.write("- decime los clientes activos")
-        st.write("- que tengo pendiente con CAM")
-        st.write("- resumime el proyecto CRM")
-        st.write("- como va onboarding")
-        st.write("- que sigue con este cliente")
-        st.write("- marcá onboarding como en progreso")
-        st.write("- cerrá la tarea formulario")
-        st.write("- agregá una nota a onboarding: falta validar con el cliente")
-        st.write("- dejá como próxima acción llamar mañana")
+    if st.button("Nueva conversacion"):
+        st.session_state["conversation_context"] = {}
+        st.info("Se limpio el contexto reciente de esta sesion.")
+
+    with st.expander("Ejemplos de consultas que podes hacer"):
+        st.write("- que tengo pendiente con Cam")
+        st.write("- y en ese proyecto?")
+        st.write("- resumime onboarding")
+        st.write("- ponelo en alta")
+        st.write("- que sigue con el CRM?")
+        st.write("- marcalo como en progreso")
+        st.write("- resumime el cliente Dallas")
+        st.write("- y sus proyectos?")
+        st.write("- cerra la del formulario")
+        st.write("- agregale una nota: falta respuesta del cliente")
 
     user_query = st.text_input(
         "Tu consulta",
-        placeholder="Ej: decime los clientes activos",
+        placeholder="Ej: que tengo pendiente con Cam",
     )
 
     if st.button("Consultar"):
         if not user_query.strip():
-            st.warning("Escribí una consulta primero.")
+            st.warning("Escribi una consulta primero.")
             return
 
+        current_context = st.session_state.get("conversation_context", {})
         parsed_query = parse_user_query_hybrid(user_query)
-        response = build_response_from_query(parsed_query, user_query=user_query)
+        response = build_response_from_query(parsed_query, user_query=user_query, conversation_context=current_context)
+        st.session_state["conversation_context"] = parsed_query.get("_conversation_context", {})
 
         save_conversation(
             user_input=user_query,
@@ -43,13 +51,21 @@ def render_conversation_page():
         st.subheader("Respuesta del asistente")
         st.write(response)
 
-        with st.expander("Debug sesión 20/21"):
+        with st.expander("Debug sesion 20/21/22"):
             st.write("Parser usado:", parsed_query.get("_parser_source", "desconocido"))
+            st.write("Decision parser:", parsed_query.get("_parser_decision"))
             st.write("Resolver scope:", parsed_query.get("_resolver_scope", "none"))
+            st.write("Resolver source:", parsed_query.get("_resolver_source", "none"))
             st.write("Resolver confidence:", parsed_query.get("_resolver_confidence", 0.0))
             st.write("Resolver ambiguous:", parsed_query.get("_resolver_ambiguous", False))
+            st.write("Context source:", parsed_query.get("_context_source", "none"))
+            st.write("Context isolated:", parsed_query.get("_context_isolated", False))
+            st.write("Security blocked:", parsed_query.get("_security_blocked", False))
+            st.write("Security reason:", parsed_query.get("_security_reason"))
             st.write("Update type:", parsed_query.get("_update_type"))
             st.write("Update real:", parsed_query.get("_update_real"))
+            st.write("Contexto reciente usado")
+            st.json(parsed_query.get("_recent_context_used", {}))
             st.write("Valores detectados")
             st.json(
                 {
@@ -64,5 +80,7 @@ def render_conversation_page():
             st.json(parsed_query)
             st.write("Resolved references")
             st.json(parsed_query.get("_resolved_references", {}))
+            st.write("Conversation context persistido")
+            st.json(parsed_query.get("_conversation_context", {}))
             st.write("Update result")
             st.json(parsed_query.get("_update_result", {}))
