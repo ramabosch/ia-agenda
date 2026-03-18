@@ -1,0 +1,41 @@
+ # Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+.env.*
+
+# SQLite / local DBs
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs / temp
+*.log
+*.tmp
+*.temp
+
+# Test / tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# IDEs / editors
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project-local artifacts
+repo_summary.pdf
