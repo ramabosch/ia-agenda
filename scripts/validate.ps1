@@ -11,11 +11,11 @@ function Run-Step {
     & $Command
 
     if ($LASTEXITCODE -ne 0) {
-        throw "Falló: $Label (exit code $LASTEXITCODE)"
+        throw "Fallo: $Label (exit code $LASTEXITCODE)"
     }
 }
 
-# Ir a la raíz del repo
+# Ir a la raiz del repo
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
@@ -23,7 +23,7 @@ $venvPython = Join-Path ".venv" "Scripts\python.exe"
 $pycacheRoot = Join-Path $env:TEMP "agenda_ai_pycache"
 
 if (-not (Test-Path $venvPython)) {
-    throw "No existe .venv o no se encontró .\.venv\Scripts\python.exe. Corré primero el setup del entorno."
+    throw "No existe .venv o no se encontro .\.venv\Scripts\python.exe. Corre primero el setup del entorno."
 }
 
 if (-not (Test-Path $pycacheRoot)) {
@@ -36,7 +36,7 @@ Run-Step "Compilando app" {
     & $venvPython -m compileall app
 }
 
-Run-Step "Probando imports críticos" {
+Run-Step "Probando imports criticos" {
     $tempPy = Join-Path $env:TEMP "agenda_ai_validate_imports.py"
 
     $pyCode = @"
@@ -76,9 +76,15 @@ print("OK_IMPORTS")
 
 Run-Step "Verificando entrypoint" {
     if (-not (Test-Path "run.py")) {
-        throw "No se encontró run.py en la raíz del repo."
+        throw "No se encontro run.py en la raiz del repo."
     }
     Write-Host "run.py encontrado."
 }
 
-Write-Host "`nValidación finalizada correctamente."
+if (Test-Path "tests") {
+    Run-Step "Corriendo tests automaticos" {
+        & $venvPython -m unittest discover -s tests -p "test_*.py" -v
+    }
+}
+
+Write-Host "`nValidacion finalizada correctamente."
