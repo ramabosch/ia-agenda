@@ -1200,6 +1200,11 @@ def _handle_conversational_continuity_intent(
     parsed_query["_continuity_used_recommendation"] = bool(snapshot and snapshot.get("recommendations"))
     parsed_query["_continuity_filter_mode"] = parsed_query.get("filter_mode")
     parsed_query["_continuity_rephrase_style"] = parsed_query.get("rephrase_style")
+    parsed_query["_adaptive_output_mode"] = parsed_query.get("rephrase_style")
+    parsed_query["_adaptive_filter_mode"] = parsed_query.get("filter_mode")
+    parsed_query["_adaptive_snapshot_reused"] = bool(snapshot)
+    parsed_query["_adaptive_degraded"] = False
+    parsed_query["_adaptive_transform_type"] = "continuity"
     parsed_query["_context_source"] = "current" if context.get("_isolated") else "none"
     parsed_query["_context_isolated"] = bool(context.get("_isolated"))
     parsed_query["_recent_context_used"] = context if context.get("_isolated") else {}
@@ -1260,6 +1265,8 @@ def _handle_conversational_continuity_intent(
                 "No tengo una respuesta previa clara en esta conversacion actual para filtrarla.",
             )
         response, filtered_snapshot = _format_filtered_context_summary(snapshot, parsed_query.get("filter_mode"))
+        parsed_query["_adaptive_degraded"] = bool(filtered_snapshot.get("degraded"))
+        parsed_query["_adaptive_transform_type"] = filtered_snapshot.get("transform_type", "filtered")
         _store_response_snapshot(parsed_query, filtered_snapshot)
         return response
 
@@ -1269,15 +1276,10 @@ def _handle_conversational_continuity_intent(
                 parsed_query,
                 "No tengo una respuesta previa clara en esta conversacion actual para reformularla.",
             )
-        response = _format_rephrased_summary(snapshot, parsed_query.get("rephrase_style"))
-        _store_response_snapshot(
-            parsed_query,
-            {
-                **snapshot,
-                "response_kind": "rephrased_summary",
-                "recommendation": snapshot.get("recommendation"),
-            },
-        )
+        response, rephrased_snapshot = _format_rephrased_summary(snapshot, parsed_query.get("rephrase_style"))
+        parsed_query["_adaptive_degraded"] = bool(rephrased_snapshot.get("degraded"))
+        parsed_query["_adaptive_transform_type"] = rephrased_snapshot.get("transform_type", "rephrased")
+        _store_response_snapshot(parsed_query, rephrased_snapshot)
         return response
 
     if parsed_query.get("intent") == "get_client_facing_summary":
@@ -1286,15 +1288,11 @@ def _handle_conversational_continuity_intent(
                 parsed_query,
                 "No tengo una respuesta previa clara en esta conversacion actual para traducirla a una version para cliente.",
             )
-        response = _format_client_facing_summary(context, snapshot)
-        _store_response_snapshot(
-            parsed_query,
-            {
-                **snapshot,
-                "response_kind": "client_facing_summary",
-                "recommendation": snapshot.get("recommendation"),
-            },
-        )
+        response, client_snapshot = _format_client_facing_summary(context, snapshot)
+        parsed_query["_adaptive_output_mode"] = "client_facing"
+        parsed_query["_adaptive_degraded"] = bool(client_snapshot.get("degraded"))
+        parsed_query["_adaptive_transform_type"] = client_snapshot.get("transform_type", "client_facing")
+        _store_response_snapshot(parsed_query, client_snapshot)
         return response
 
     return _abort_with_context(parsed_query, "No pude interpretar ese follow-up conversacional con seguridad.")
@@ -2078,18 +2076,25 @@ def _format_filtered_context_summary(snapshot: dict, filter_mode: str | None) ->
         "critical": "solo lo critico",
         "urgent": "solo lo urgente",
         "blocked": "solo las bloqueadas",
+        "risks": "solo los riesgos",
+        "next_steps": "solo los proximos pasos",
+        "important": "solo lo importante",
     }.get(filter_mode, "este filtro")
 
     filtered_snapshot = {
         **snapshot,
         "response_kind": "filtered_summary",
         "filter_mode": filter_mode,
+        "transform_type": "filtered",
         "items": filtered[:5],
         "highlights": filtered[:5],
         "blockers": [item for item in filtered if item.get("is_blocked")][:5],
+        "next_steps": [item for item in filtered if item.get("has_next_action") or item.get("next_action")][:5],
+        "degraded": False,
     }
 
     if not filtered:
+        filtered_snapshot["degraded"] = True
         return (f"En el contexto actual no veo elementos que entren en {label}.", filtered_snapshot)
 
     lines = [f"Te muestro {label} dentro del contexto actual:"]
@@ -2098,7 +2103,7 @@ def _format_filtered_context_summary(snapshot: dict, filter_mode: str | None) ->
     return "\n".join(lines), filtered_snapshot
 
 
-def _format_rephrased_summary(snapshot: dict, rephrase_style: str | None) -> str:
+def _format_rephrased_summary(snapshot: dict, rephrase_style: str | None) -> tuple[str, dict]:
     entity_name = snapshot.get("entity_name") or "este contexto"
     recommendation = snapshot.get("recommendation") or "No veo una recomendacion principal fuerte con los datos actuales."
     top_items = _snapshot_items(snapshot)[:2]
@@ -2146,6 +2151,190 @@ def _format_client_facing_summary(context: dict, snapshot: dict) -> str:
     if snapshot.get("recommendation"):
         lines.append(f"- Proximo movimiento interno: {snapshot['recommendation']}")
     return "\n".join(lines)
+
+
+def _snapshot_brief_points(snapshot: dict, *, include_recommendation: bool = False) -> list[str]:
+    points: list[str] = []
+    overview = snapshot.get("status_overview")
+    if overview:
+        points.append(f"- Estado: {overview}")
+
+    top_items = _snapshot_items(snapshot)[:3]
+    for item in top_items[:2]:
+        points.append(_format_snapshot_item(item))
+
+    next_steps = snapshot.get("next_steps") or []
+    if next_steps:
+        points.append(f"- Proximo paso: {_format_snapshot_item(next_steps[0]).removeprefix('- ')}")
+
+    if include_recommendation and snapshot.get("recommendation"):
+        points.append(f"- Recomendacion: {snapshot['recommendation']}")
+
+    return points
+
+
+def _format_filtered_context_summary(snapshot: dict, filter_mode: str | None) -> tuple[str, dict]:
+    items = _snapshot_items(snapshot)
+    filtered = [item for item in items if _matches_snapshot_filter(item, filter_mode)]
+    label = {
+        "critical": "solo lo critico",
+        "urgent": "solo lo urgente",
+        "blocked": "solo las bloqueadas",
+        "risks": "solo los riesgos",
+        "next_steps": "solo los proximos pasos",
+        "important": "solo lo importante",
+    }.get(filter_mode, "este filtro")
+
+    filtered_snapshot = {
+        **snapshot,
+        "response_kind": "filtered_summary",
+        "filter_mode": filter_mode,
+        "transform_type": "filtered",
+        "items": filtered[:5],
+        "highlights": filtered[:5],
+        "blockers": [item for item in filtered if item.get("is_blocked")][:5],
+        "next_steps": [item for item in filtered if item.get("has_next_action") or item.get("next_action")][:5],
+        "degraded": False,
+    }
+
+    if not filtered:
+        filtered_snapshot["degraded"] = True
+        return (f"En el contexto actual no veo elementos que entren en {label}.", filtered_snapshot)
+
+    lines = [f"Te muestro {label} dentro del contexto actual:"]
+    for item in filtered[:5]:
+        lines.append(_format_snapshot_item(item))
+    return "\n".join(lines), filtered_snapshot
+
+
+def _format_rephrased_summary(snapshot: dict, rephrase_style: str | None) -> tuple[str, dict]:
+    entity_name = snapshot.get("entity_name") or "este contexto"
+    recommendation = snapshot.get("recommendation") or "No veo una recomendacion principal fuerte con los datos actuales."
+    top_items = _snapshot_items(snapshot)[:3]
+    top_line = _format_snapshot_item(top_items[0]) if top_items else "- No veo un punto dominante."
+    overview = snapshot.get("status_overview") or "No veo un cambio fuerte."
+    blockers = snapshot.get("blockers") or []
+    next_steps = snapshot.get("next_steps") or []
+    highlights = snapshot.get("highlights") or top_items
+    degraded = False
+
+    if rephrase_style == "three_lines":
+        lines = [
+            f"Resumen rapido de {entity_name}: {snapshot.get('status_overview') or 'sin cambios fuertes.'}",
+            top_line,
+            f"Cierre: {recommendation}",
+        ]
+        response = "\n".join(lines[:3])
+    elif rephrase_style == "executive":
+        lines = [
+            f"Version ejecutiva de {entity_name}:",
+            f"- Estado: {snapshot.get('status_overview') or 'Sin senal dominante.'}",
+            f"- Foco: {top_line.removeprefix('- ')}",
+            f"- Decision: {recommendation}",
+        ]
+        response = "\n".join(lines)
+    elif rephrase_style == "tactical":
+        lines = [f"Version tactica de {entity_name}:"]
+        lines.append(f"- Estado: {overview}")
+        if blockers:
+            lines.append(f"- Riesgo principal: {_format_snapshot_item(blockers[0]).removeprefix('- ')}")
+        if next_steps:
+            lines.append(f"- Proximo paso: {_format_snapshot_item(next_steps[0]).removeprefix('- ')}")
+        else:
+            lines.append("- Proximo paso: no veo uno explicito; conviene definirlo antes de seguir.")
+            degraded = True
+        lines.append(f"- Prioridad operativa: {recommendation}")
+        response = "\n".join(lines)
+    elif rephrase_style == "detailed":
+        lines = [f"Version con mas detalle de {entity_name}:"]
+        lines.append(f"- Estado general: {overview}")
+        if highlights:
+            lines.append("- Lo mas importante:")
+            for item in highlights[:3]:
+                lines.append(_format_snapshot_item(item))
+        if blockers:
+            lines.append("- Riesgos detectados:")
+            for item in blockers[:3]:
+                lines.append(_format_snapshot_item(item))
+        else:
+            lines.append("- Riesgos detectados: no veo uno dominante en la respuesta previa.")
+            degraded = True
+        if next_steps:
+            lines.append("- Proximos pasos:")
+            for item in next_steps[:3]:
+                lines.append(_format_snapshot_item(item))
+        else:
+            lines.append("- Proximos pasos: no veo uno explicito en la respuesta previa.")
+            degraded = True
+        lines.append(f"- Recomendacion: {recommendation}")
+        response = "\n".join(lines)
+    elif rephrase_style == "bullets":
+        points = _snapshot_brief_points(snapshot)
+        if not points:
+            degraded = True
+            points = ["- No veo suficiente material estructurado para reformularlo en bullets."]
+        response = "\n".join(points[:5])
+    elif rephrase_style == "meeting_ready":
+        lines = [f"Version para reunion sobre {entity_name}:"]
+        lines.extend(_snapshot_brief_points(snapshot, include_recommendation=True)[:4])
+        response = "\n".join(lines)
+    elif rephrase_style == "personal":
+        lines = [f"Para vos sobre {entity_name}:"]
+        lines.append(f"- Lo principal ahora es {top_line.removeprefix('- ')}")
+        if next_steps:
+            lines.append(f"- Lo siguiente que haria es {_format_snapshot_item(next_steps[0]).removeprefix('- ')}")
+        else:
+            lines.append("- Lo siguiente que haria es definir un proximo paso claro antes de mover mas cosas.")
+            degraded = True
+        lines.append(f"- Mi lectura operativa: {recommendation}")
+        response = "\n".join(lines)
+    elif rephrase_style == "simple":
+        lines = [
+            f"En simple: con {entity_name}, lo principal es esto.",
+            top_line,
+            f"Lo que haria es: {recommendation}",
+        ]
+        response = "\n".join(lines)
+    else:
+        lines = [
+            f"En corto: {overview}",
+            f"Principal foco: {top_line.removeprefix('- ')}",
+        ]
+        response = "\n".join(lines)
+
+    rephrased_snapshot = {
+        **snapshot,
+        "response_kind": "rephrased_summary",
+        "transform_type": "rephrased",
+        "rephrase_style": rephrase_style or "short",
+        "degraded": degraded,
+        "recommendation": recommendation,
+    }
+    return response, rephrased_snapshot
+
+
+def _format_client_facing_summary(context: dict, snapshot: dict) -> tuple[str, dict]:
+    entity_name = snapshot.get("entity_name") or context.get(context.get("scope", ""), {}).get("name") or "el tema actual"
+    top_items = _snapshot_items(snapshot)[:2]
+    lines = [f"Si hoy se lo dijera al cliente sobre {entity_name}, diria algo asi:"]
+    lines.append(f"- Estado general: {snapshot.get('status_overview') or 'Seguimos el tema y el foco esta en lo mas sensible.'}")
+    if top_items:
+        lines.append(f"- El punto mas importante hoy es {top_items[0].get('title', 'el foco principal')}.")
+    degraded = False
+    if snapshot.get("next_steps"):
+        next_item = snapshot["next_steps"][0]
+        lines.append(f"- Proximo paso interno: {next_item.get('next_action') or next_item.get('title', 'seguir el punto principal')}.")
+    else:
+        lines.append("- Proximo paso interno: no veo uno explicito en la respuesta previa.")
+        degraded = True
+    client_snapshot = {
+        **snapshot,
+        "response_kind": "client_facing_summary",
+        "transform_type": "client_facing",
+        "degraded": degraded,
+        "recommendation": snapshot.get("recommendation"),
+    }
+    return "\n".join(lines), client_snapshot
 
 
 def _is_next_step_query(user_query: str | None) -> bool:
@@ -2282,6 +2471,15 @@ def _snapshot_items(snapshot: dict) -> list[dict]:
 def _matches_snapshot_filter(item: dict, filter_mode: str | None) -> bool:
     if filter_mode == "blocked":
         return bool(item.get("is_blocked")) or "bloqueada" in " ".join(item.get("friction_signals", []))
+    if filter_mode == "risks":
+        return bool(
+            item.get("is_blocked")
+            or item.get("has_strong_stall_signal")
+            or item.get("friction_signals")
+            or item.get("is_overdue")
+        )
+    if filter_mode == "next_steps":
+        return bool(item.get("has_next_action") or item.get("next_action"))
     if filter_mode == "urgent":
         return bool(item.get("is_urgent") or item.get("is_overdue") or item.get("is_due_today") or item.get("is_high_priority") or item.get("is_blocked"))
     if filter_mode == "critical":
@@ -2291,6 +2489,14 @@ def _matches_snapshot_filter(item: dict, filter_mode: str | None) -> bool:
             or item.get("is_overdue")
             or item.get("has_strong_stall_signal")
             or item.get("recommendation_score", 0) >= 120
+        )
+    if filter_mode == "important":
+        return bool(
+            item.get("is_blocked")
+            or item.get("is_high_priority")
+            or item.get("is_overdue")
+            or item.get("recommendation_score", 0) >= 90
+            or item.get("has_next_action")
         )
     return True
 

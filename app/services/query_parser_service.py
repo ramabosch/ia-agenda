@@ -138,6 +138,31 @@ def _parse_read_intents(normalized: str) -> dict | None:
     ):
         return {"intent": "get_filtered_context_summary", "filter_mode": "blocked"}
 
+    if any(phrase in normalized for phrase in ["quiero solo riesgos", "solo riesgos"]):
+        return {"intent": "get_filtered_context_summary", "filter_mode": "risks"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "quiero solo proximos pasos",
+            "solo proximos pasos",
+        ]
+    ):
+        return {"intent": "get_filtered_context_summary", "filter_mode": "next_steps"}
+
+    if "mostrame solo lo importante" in normalized:
+        return {"intent": "get_filtered_context_summary", "filter_mode": "important"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "damelo corto",
+            "quiero la version resumida",
+            "quiero la version corta",
+        ]
+    ):
+        return {"intent": "get_rephrased_summary", "rephrase_style": "short"}
+
     if any(
         phrase in normalized
         for phrase in [
@@ -148,9 +173,25 @@ def _parse_read_intents(normalized: str) -> dict | None:
     ):
         return {"intent": "get_rephrased_summary", "rephrase_style": "three_lines"}
 
+    if any(phrase in normalized for phrase in ["damelo ejecutivo", "damelo mas ejecutivo"]):
+        return {"intent": "get_rephrased_summary", "rephrase_style": "executive"}
+
+    if "damelo tactico" in normalized:
+        return {"intent": "get_rephrased_summary", "rephrase_style": "tactical"}
+
+    if "quiero mas detalle" in normalized:
+        return {"intent": "get_rephrased_summary", "rephrase_style": "detailed"}
+
+    if any(phrase in normalized for phrase in ["dame solo bullets", "solo bullets"]):
+        return {"intent": "get_rephrased_summary", "rephrase_style": "bullets"}
+
+    if "decimelo como para reunion" in normalized:
+        return {"intent": "get_rephrased_summary", "rephrase_style": "meeting_ready"}
+
     if any(
         phrase in normalized
         for phrase in [
+            "damelo ejecutivo",
             "damelo mas ejecutivo",
             "dÃ¡melo mÃ¡s ejecutivo",
         ]
@@ -170,15 +211,19 @@ def _parse_read_intents(normalized: str) -> dict | None:
         phrase in normalized
         for phrase in [
             "decimelo mas corto",
+            "decimelo como para mi",
             "decÃ­melo mÃ¡s corto",
         ]
     ):
+        if "como para mi" in normalized:
+            return {"intent": "get_rephrased_summary", "rephrase_style": "personal"}
         return {"intent": "get_rephrased_summary", "rephrase_style": "short"}
 
     if any(
         phrase in normalized
         for phrase in [
             "que le diria al cliente hoy",
+            "decimelo como para mandarselo al cliente",
             "quÃ© le dirÃ­a al cliente hoy",
         ]
     ):

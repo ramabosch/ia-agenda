@@ -84,6 +84,33 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(short["rephrase_style"], "three_lines")
         self.assertEqual(client_facing["intent"], "get_client_facing_summary")
 
+    def test_parse_adaptive_output_queries(self):
+        short = parse_user_query("damelo corto")
+        executive = parse_user_query("damelo ejecutivo")
+        tactical = parse_user_query("damelo tactico")
+        detailed = parse_user_query("quiero mas detalle")
+        risks = parse_user_query("quiero solo riesgos")
+        next_steps = parse_user_query("quiero solo proximos pasos")
+        bullets = parse_user_query("dame solo bullets")
+        meeting = parse_user_query("decimelo como para reunion")
+        personal = parse_user_query("decimelo como para mi")
+        important = parse_user_query("mostrame solo lo importante")
+        client = parse_user_query("decimelo como para mandarselo al cliente")
+
+        self.assertEqual(short["intent"], "get_rephrased_summary")
+        self.assertEqual(short["rephrase_style"], "short")
+        self.assertEqual(executive["rephrase_style"], "executive")
+        self.assertEqual(tactical["rephrase_style"], "tactical")
+        self.assertEqual(detailed["rephrase_style"], "detailed")
+        self.assertEqual(risks["intent"], "get_filtered_context_summary")
+        self.assertEqual(risks["filter_mode"], "risks")
+        self.assertEqual(next_steps["filter_mode"], "next_steps")
+        self.assertEqual(bullets["rephrase_style"], "bullets")
+        self.assertEqual(meeting["rephrase_style"], "meeting_ready")
+        self.assertEqual(personal["rephrase_style"], "personal")
+        self.assertEqual(important["filter_mode"], "important")
+        self.assertEqual(client["intent"], "get_client_facing_summary")
+
     def test_parse_contextual_followups(self):
         projects = parse_user_query("y sus proyectos?")
         close_task = parse_user_query("cerrala")
