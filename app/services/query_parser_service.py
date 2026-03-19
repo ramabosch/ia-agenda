@@ -85,6 +85,60 @@ def _parse_read_intents(normalized: str) -> dict | None:
     if any(
         phrase in normalized
         for phrase in [
+            "que viene estancado",
+            "qué viene estancado",
+            "que esta frenado hace mucho",
+            "qué está frenado hace mucho",
+            "que me preocuparia por atraso",
+            "qué me preocuparía por atraso",
+            "que tareas estan abiertas hace demasiado",
+            "qué tareas están abiertas hace demasiado",
+            "que proyecto esta acumulando friccion",
+            "qué proyecto está acumulando fricción",
+            "donde se nos esta trabando el trabajo",
+            "dónde se nos está trabando el trabajo",
+            "que esta en progreso hace demasiado",
+            "qué está en progreso hace demasiado",
+            "que tiene pinta de estar mal seguido",
+            "que esta abierto hace mucho sin avances",
+            "qué está abierto hace mucho sin avances",
+            "y que esta frenado",
+            "y qué está frenado",
+        ]
+    ):
+        if "proyecto" in normalized:
+            return {"intent": "get_operational_friction_summary", "project_name": "este proyecto"} if "este proyecto" in normalized else {"intent": "get_operational_friction_summary"}
+        if "y que esta frenado" in normalized or "y qué está frenado" in normalized:
+            return {"intent": "get_operational_friction_summary", "entity_hint": "aca"}
+        return {"intent": "get_operational_friction_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que me preocuparia de este cliente",
+            "qué me preocuparía de este cliente",
+            "que viene mal aca",
+            "qué viene mal acá",
+        ]
+    ):
+        if "cliente" in normalized:
+            return {"intent": "get_operational_friction_summary", "client_name": "este cliente"}
+        return {"intent": "get_operational_friction_summary", "entity_hint": "aca"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que me preocuparia de ",
+            "qué me preocuparía de ",
+        ]
+    ):
+        match = re.search(r"(?:que me preocuparia de|qué me preocuparía de)\s+(.+)$", normalized)
+        if match:
+            return {"intent": "get_operational_friction_summary", "entity_hint": match.group(1).strip()}
+
+    if any(
+        phrase in normalized
+        for phrase in [
             "comentame en que andamos con ",
             "comentame en qué andamos con ",
             "dame un resumen operativo de ",

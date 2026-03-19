@@ -31,6 +31,8 @@ def make_task(
     due_date=None,
     last_note: str | None = None,
     next_action: str | None = None,
+    created_at=None,
+    last_updated_at=None,
 ):
     task = SimpleNamespace(
         id=task_id,
@@ -44,8 +46,8 @@ def make_task(
         next_action=next_action,
         updates=[],
         description=None,
-        created_at=datetime(2026, 1, 1, 12, 0, 0),
-        last_updated_at=None,
+        created_at=created_at or datetime(2026, 1, 1, 12, 0, 0),
+        last_updated_at=last_updated_at,
     )
     if project is not None:
         project.tasks.append(task)
@@ -63,6 +65,7 @@ def make_task_summary(task, *, updates_count: int = 0, latest_update: str | None
         "last_note": task.last_note,
         "next_action": task.next_action,
         "last_updated_at": task.last_updated_at,
+        "created_at": task.created_at,
         "project_id": task.project.id if task.project else None,
         "project_name": task.project.name if task.project else "Desconocido",
         "client_id": task.project.client.id if task.project and task.project.client else None,
@@ -99,4 +102,3 @@ def make_conversation_log(parsed_query: dict, *, user_input: str = "consulta pre
         parsed_intent=str(parsed_query),
         response_output=response_output,
     )
-

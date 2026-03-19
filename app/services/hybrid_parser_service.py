@@ -9,6 +9,7 @@ EXECUTIVE_INTENTS = {
     "get_client_attention_summary",
     "get_project_attention_summary",
     "get_general_executive_summary",
+    "get_operational_friction_summary",
     "get_next_actions_summary",
     "get_missing_next_actions_summary",
     "get_followup_needed_summary",

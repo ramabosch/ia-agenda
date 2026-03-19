@@ -1,6 +1,6 @@
 from app.db.session import SessionLocal
 from app.repositories import project_repository
-from app.services.task_service import build_operational_focus_from_tasks
+from app.services.task_service import build_friction_focus_from_tasks, build_operational_focus_from_tasks
 
 
 def create_project(client_id: int, name: str, description: str | None = None):
@@ -252,3 +252,47 @@ def _build_project_status_overview(summary: dict) -> str:
     if in_progress:
         parts.append(f"{in_progress} siguen en progreso.")
     return " ".join(parts)
+
+
+def get_operational_friction_project_snapshot() -> dict:
+    projects = get_all_projects_with_tasks()
+    items = []
+
+    for project in projects:
+        focus = build_friction_focus_from_tasks(project.tasks)
+        open_tasks = len(focus["open_tasks"])
+        friction_tasks = len(focus["friction_tasks"])
+        stalled_tasks = len(focus["stalled_tasks"])
+        without_next_action = len([item for item in focus["open_tasks"] if item["missing_next_action"]])
+        blocked_tasks = len([item for item in focus["open_tasks"] if item["is_blocked"]])
+        score = stalled_tasks * 5 + blocked_tasks * 4 + without_next_action * 3 + friction_tasks * 2 + open_tasks
+
+        items.append(
+            {
+                "project_id": project.id,
+                "project_name": project.name,
+                "client_id": project.client.id if project.client else None,
+                "client_name": project.client.name if project.client else "Desconocido",
+                "open_tasks": open_tasks,
+                "friction_tasks": friction_tasks,
+                "stalled_tasks": stalled_tasks,
+                "blocked_tasks": blocked_tasks,
+                "without_next_action": without_next_action,
+                "score": score,
+            }
+        )
+
+    ranked = sorted(
+        [item for item in items if item["open_tasks"] > 0 and item["score"] > 0],
+        key=lambda item: (-item["score"], item["project_name"]),
+    )
+
+    return {
+        "projects": items,
+        "prioritized_projects": ranked[:5],
+        "heuristic": [
+            "mas tareas estancadas primero",
+            "despues mas bloqueadas",
+            "despues falta de next_action y acumulacion abierta",
+        ],
+    }

@@ -29,6 +29,7 @@ ALLOWED_INTENTS = {
     "get_project_attention_summary",
     "get_general_executive_summary",
     "get_operational_summary",
+    "get_operational_friction_summary",
     "get_next_actions_summary",
     "get_missing_next_actions_summary",
     "get_followup_needed_summary",
@@ -410,6 +411,24 @@ JSON:
   "entity_hint": "cam"
 }
 
+Usuario: que viene estancado
+JSON:
+{
+  "intent": "get_operational_friction_summary",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null,
+  "entity_hint": null
+}
+
 Usuario: dashboard
 JSON:
 {
@@ -465,6 +484,7 @@ Intentos permitidos:
 - get_project_attention_summary
 - get_general_executive_summary
 - get_operational_summary
+- get_operational_friction_summary
 - get_next_actions_summary
 - get_missing_next_actions_summary
 - get_followup_needed_summary
@@ -623,6 +643,12 @@ def _coerce_semantics(payload: dict[str, Any], user_query: str) -> dict[str, Any
             payload["intent"] = "unknown"
 
     if intent == "get_operational_summary":
+        if not payload.get("entity_hint"):
+            payload["entity_hint"] = task_name or project_name or client_name
+        if not any([payload.get("entity_hint"), client_name, project_name, task_name, task_id, project_id]):
+            payload["intent"] = "unknown"
+
+    if intent == "get_operational_friction_summary":
         if not payload.get("entity_hint"):
             payload["entity_hint"] = task_name or project_name or client_name
         if not any([payload.get("entity_hint"), client_name, project_name, task_name, task_id, project_id]):

@@ -6,6 +6,7 @@ from app.services.conversation_service import (
 from app.services.project_service import (
     get_executive_project_snapshot,
     get_followup_project_snapshot,
+    get_operational_friction_project_snapshot,
     get_project_advanced_summary,
     get_project_operational_summary,
     get_projects_by_client_id,
@@ -14,10 +15,13 @@ from app.services.reference_resolver import resolve_references
 from app.services.task_service import (
     add_task_note_conversational,
     build_client_advanced_summary,
+    build_friction_focus_from_tasks,
+    build_task_friction_summary,
     build_task_advanced_summary,
     get_executive_task_snapshot,
     get_followup_task_snapshot,
     get_open_tasks_by_client_id,
+    get_operational_friction_snapshot,
     get_task_operational_summary,
     get_tasks_by_client_id,
     get_tasks_by_project_id,
@@ -32,6 +36,7 @@ from app.services.task_update_service import create_task_update
 REFERENCE_AWARE_INTENTS = {
     "clarify_entity_reference",
     "get_operational_summary",
+    "get_operational_friction_summary",
     "get_open_tasks_by_client_name",
     "get_projects_by_client_name",
     "get_tasks_by_client_name",
@@ -78,6 +83,10 @@ FOLLOWUP_INTENTS = {
     "get_push_today_summary",
 }
 
+FRICTION_INTENTS = {
+    "get_operational_friction_summary",
+}
+
 
 def build_response_from_query(
     parsed_query: dict,
@@ -92,6 +101,14 @@ def build_response_from_query(
 
     if intent == "get_operational_summary":
         return _handle_operational_summary_intent(
+            parsed_query,
+            resolved_references,
+            user_query=user_query,
+            conversation_context=conversation_context,
+        )
+
+    if intent in FRICTION_INTENTS:
+        return _handle_operational_friction_intent(
             parsed_query,
             resolved_references,
             user_query=user_query,
@@ -761,6 +778,186 @@ def _build_contextual_operational_summary(parsed_query: dict, context: dict, sco
     return None
 
 
+def _handle_operational_friction_intent(
+    parsed_query: dict,
+    resolved_references: dict,
+    *,
+    user_query: str | None,
+    conversation_context: dict | None,
+) -> str:
+    context = conversation_context or {}
+    contextual_scope = _preferred_contextual_friction_scope(user_query, context)
+    if contextual_scope:
+        contextual_response = _build_contextual_friction_summary(parsed_query, context, contextual_scope)
+        if contextual_response:
+            return contextual_response
+
+    if resolved_references.get("security_blocked"):
+        return _abort_with_context(
+            parsed_query,
+            "No tengo contexto aislado actual suficiente para analizar que esta frenado con seguridad. Decime el cliente, proyecto o tarea exacta.",
+        )
+
+    if resolved_references.get("clarification_needed") or resolved_references.get("ambiguous"):
+        return _abort_with_context(parsed_query, _build_clarification_response(resolved_references))
+
+    if resolved_references.get("task", {}).get("resolved"):
+        summary = get_task_operational_summary(resolved_references["task"]["resolved"]["id"])
+        if not summary:
+            return _abort_with_context(parsed_query, "Encontre la tarea, pero no pude cargar sus senales de friccion.")
+        _remember_context_from_summary(parsed_query, summary, "task")
+        friction_summary = build_task_friction_summary(summary)
+        _attach_friction_debug(parsed_query, friction_summary, scope_override="task")
+        return _format_task_friction_summary(summary, friction_summary)
+
+    if resolved_references.get("project", {}).get("resolved"):
+        project = resolved_references["project"]["resolved"]
+        tasks = get_tasks_by_project_id(project["id"])
+        summary = _build_project_friction_summary(project["name"], resolved_references.get("client", {}).get("resolved", {}).get("name") or "Desconocido", tasks)
+        _remember_context(parsed_query, resolved_references, focus_scope="project", tasks=tasks)
+        _attach_friction_debug(parsed_query, summary, scope_override="project")
+        return _format_project_friction_summary(summary)
+
+    if resolved_references.get("client", {}).get("resolved"):
+        client = resolved_references["client"]["resolved"]
+        tasks = get_tasks_by_client_id(client["id"])
+        projects = get_projects_by_client_id(client["id"])
+        summary = _build_client_friction_summary(client["name"], projects, tasks)
+        _remember_context(parsed_query, resolved_references, focus_scope="client", projects=projects)
+        _attach_friction_debug(parsed_query, summary, scope_override="client")
+        return _format_client_friction_summary(summary)
+
+    task_snapshot = get_operational_friction_snapshot()
+    project_snapshot = get_operational_friction_project_snapshot()
+    client_snapshot = _build_client_friction_snapshot(task_snapshot)
+    parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
+    _attach_friction_debug(
+        parsed_query,
+        {
+            "scope": "global",
+            "status_overview": task_snapshot["status_overview"],
+            "heuristic": task_snapshot["heuristic"],
+            "signals": task_snapshot["friction_tasks"],
+            "recommendation": task_snapshot["recommendation"],
+        },
+        scope_override="global",
+    )
+    return _format_global_friction_summary(task_snapshot, project_snapshot, client_snapshot)
+
+
+def _preferred_contextual_friction_scope(user_query: str | None, context: dict) -> str | None:
+    if not user_query or not context or not context.get("_isolated"):
+        return None
+    normalized = user_query.strip().lower()
+    if not any(
+        marker in normalized
+        for marker in (
+            "que me preocuparia de este cliente",
+            "qué me preocuparía de este cliente",
+            "que viene mal aca",
+            "qué viene mal acá",
+            "y que esta frenado",
+            "y qué está frenado",
+        )
+    ):
+        return None
+    return context.get("scope")
+
+
+def _build_contextual_friction_summary(parsed_query: dict, context: dict, scope: str) -> str | None:
+    if scope == "task" and context.get("task"):
+        summary = get_task_operational_summary(context["task"]["id"])
+        if not summary:
+            return None
+        friction_summary = build_task_friction_summary(summary)
+        _remember_context_from_summary(parsed_query, summary, "task")
+        _attach_friction_debug(parsed_query, friction_summary, scope_override="contextual_task")
+        return _format_task_friction_summary(summary, friction_summary)
+
+    if scope == "project" and context.get("project"):
+        tasks = get_tasks_by_project_id(context["project"]["id"])
+        summary = _build_project_friction_summary(
+            context["project"]["name"],
+            context.get("client", {}).get("name", "Desconocido"),
+            tasks,
+        )
+        parsed_query["_conversation_context"] = context
+        _attach_friction_debug(parsed_query, summary, scope_override="contextual_project")
+        return _format_project_friction_summary(summary)
+
+    if scope == "client" and context.get("client"):
+        tasks = get_tasks_by_client_id(context["client"]["id"])
+        projects = get_projects_by_client_id(context["client"]["id"])
+        summary = _build_client_friction_summary(context["client"]["name"], projects, tasks)
+        parsed_query["_conversation_context"] = context
+        _attach_friction_debug(parsed_query, summary, scope_override="contextual_client")
+        return _format_client_friction_summary(summary)
+
+    return None
+
+
+def _build_project_friction_summary(project_name: str, client_name: str, tasks: list) -> dict:
+    focus = build_friction_focus_from_tasks(tasks)
+    open_count = len(focus["open_tasks"])
+    return {
+        "scope": "project",
+        "entity_name": project_name,
+        "client_name": client_name,
+        "status_overview": (
+            f"Hay {open_count} tareas abiertas y {len(focus['friction_tasks'])} con senales de friccion."
+            if open_count
+            else "No veo tareas abiertas en este proyecto."
+        ),
+        "signals": focus["friction_tasks"],
+        "recommendation": focus["recommendation"],
+        "heuristic": focus["heuristic"],
+    }
+
+
+def _build_client_friction_summary(client_name: str, projects: list, tasks: list) -> dict:
+    focus = build_friction_focus_from_tasks(tasks)
+    open_count = len(focus["open_tasks"])
+    return {
+        "scope": "client",
+        "entity_name": client_name,
+        "project_count": len(projects),
+        "status_overview": (
+            f"Hay {len(projects)} proyectos, {open_count} tareas abiertas y {len(focus['friction_tasks'])} con senales de friccion."
+            if open_count
+            else f"Hay {len(projects)} proyectos y no veo trabajo abierto con friccion clara."
+        ),
+        "signals": focus["friction_tasks"],
+        "recommendation": focus["recommendation"],
+        "heuristic": focus["heuristic"],
+    }
+
+
+def _build_client_friction_snapshot(task_snapshot: dict) -> dict:
+    clients = {}
+    for item in task_snapshot["friction_tasks"]:
+        client_id = item["client_id"]
+        if client_id is None:
+            continue
+
+        client = clients.setdefault(
+            client_id,
+            {
+                "client_name": item["client_name"],
+                "friction_tasks": 0,
+                "strong_stall_signals": 0,
+                "without_next_action": 0,
+                "score": 0,
+            },
+        )
+        client["friction_tasks"] += 1
+        client["strong_stall_signals"] += int(item["has_strong_stall_signal"])
+        client["without_next_action"] += int(item["missing_next_action"])
+        client["score"] = client["strong_stall_signals"] * 5 + client["without_next_action"] * 3 + client["friction_tasks"] * 2
+
+    prioritized = sorted(clients.values(), key=lambda item: (-item["score"], item["client_name"]))
+    return {"prioritized_clients": prioritized[:5]}
+
+
 def _format_scoped_followup_list(parsed_query: dict, *, scope: str, scope_name: str, tasks: list) -> str:
     items = _build_followup_items_from_tasks(tasks)
     open_items = [item for item in items if item["status"] != "hecha"]
@@ -1406,6 +1603,54 @@ def _format_advanced_client_summary(advanced_summary: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_task_friction_summary(summary: dict, friction_summary: dict) -> str:
+    lines = [f"Lo que me preocuparia de la tarea {summary['title']}:"] 
+    lines.append(f"Estado general: {friction_summary['status_overview']}")
+    _append_friction_sections(lines, friction_summary)
+    return "\n".join(lines)
+
+
+def _format_project_friction_summary(summary: dict) -> str:
+    lines = [f"Lo que me preocuparia del proyecto {summary['entity_name']}:"] 
+    lines.append(f"Estado general: {summary['status_overview']}")
+    _append_friction_sections(lines, summary)
+    return "\n".join(lines)
+
+
+def _format_client_friction_summary(summary: dict) -> str:
+    lines = [f"Lo que me preocuparia de {summary['entity_name']}:"] 
+    lines.append(f"Estado general: {summary['status_overview']}")
+    _append_friction_sections(lines, summary)
+    return "\n".join(lines)
+
+
+def _format_global_friction_summary(task_snapshot: dict, project_snapshot: dict, client_snapshot: dict) -> str:
+    lines = ["Lo que hoy muestra mas estancamiento o friccion es:"]
+    lines.append(f"Estado general: {task_snapshot['status_overview']}")
+
+    if task_snapshot["friction_tasks"]:
+        lines.append("Tareas destacadas por friccion:")
+        for item in task_snapshot["friction_tasks"][:5]:
+            lines.append(_format_friction_item(item))
+
+    if project_snapshot["prioritized_projects"]:
+        lines.append("Proyectos con mas friccion:")
+        for item in project_snapshot["prioritized_projects"][:3]:
+            lines.append(
+                f"- {item['project_name']} ({item['client_name']}) | Friccion: {item['friction_tasks']} | Bloqueadas: {item['blocked_tasks']} | Sin next_action: {item['without_next_action']}"
+            )
+
+    if client_snapshot["prioritized_clients"]:
+        lines.append("Clientes que merecen atencion:")
+        for item in client_snapshot["prioritized_clients"][:3]:
+            lines.append(
+                f"- {item['client_name']} | Friccion: {item['friction_tasks']} | Senales fuertes: {item['strong_stall_signals']}"
+            )
+
+    lines.append(f"Recomendacion: {task_snapshot['recommendation']}")
+    return "\n".join(lines)
+
+
 def _is_next_step_query(user_query: str | None) -> bool:
     if not user_query:
         return False
@@ -1451,6 +1696,20 @@ def _append_operational_sections(lines: list[str], advanced_summary: dict) -> No
         lines.append(f"Recomendacion: {recommendation}")
 
 
+def _append_friction_sections(lines: list[str], summary: dict) -> None:
+    signals = summary.get("signals") or []
+    if signals:
+        lines.append("Senales de friccion:")
+        for item in signals[:4]:
+            lines.append(_format_friction_item(item))
+    else:
+        lines.append("Senales de friccion: no veo una senal fuerte con los datos actuales.")
+
+    recommendation = summary.get("recommendation")
+    if recommendation:
+        lines.append(f"Recomendacion: {recommendation}")
+
+
 def _format_operational_item(item) -> str:
     if isinstance(item, str):
         return f"- {item}"
@@ -1467,6 +1726,19 @@ def _format_operational_item(item) -> str:
         line += f" | Proximo paso: {item['next_action']}"
     elif item.get("missing_next_action"):
         line += " | Sin proxima accion definida"
+    return line
+
+
+def _format_friction_item(item) -> str:
+    if isinstance(item, str):
+        return f"- {item}"
+    signals = ", ".join(item.get("friction_signals", [])) or "friccion probable"
+    line = f"- {item['title']}"
+    if item.get("project_name") and item.get("project_name") != "Sin proyecto":
+        line += f" | Proyecto: {item['project_name']}"
+    if item.get("client_name") and item.get("client_name") != "Desconocido":
+        line += f" | Cliente: {item['client_name']}"
+    line += f" | Senales: {signals}"
     return line
 
 
@@ -1497,6 +1769,14 @@ def _attach_operational_summary_debug(parsed_query: dict, advanced_summary: dict
     parsed_query["_summary_recommendation"] = advanced_summary.get("recommendation")
 
 
+def _attach_friction_debug(parsed_query: dict, summary: dict, scope_override: str | None = None) -> None:
+    parsed_query["_friction_scope"] = scope_override or summary.get("scope")
+    parsed_query["_friction_heuristic"] = summary.get("heuristic", [])
+    parsed_query["_friction_signals"] = [_debug_summary_item(item) for item in summary.get("signals", [])[:5]]
+    parsed_query["_friction_entities"] = [_debug_summary_item(item) for item in summary.get("signals", [])[:5]]
+    parsed_query["_friction_recommendation"] = summary.get("recommendation")
+
+
 def _debug_summary_item(item):
     if isinstance(item, str):
         return item
@@ -1507,6 +1787,7 @@ def _debug_summary_item(item):
         "next_action": item.get("next_action"),
         "status": item.get("status"),
         "priority": item.get("priority"),
+        "friction_signals": item.get("friction_signals"),
     }
 
 

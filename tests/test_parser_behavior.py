@@ -48,6 +48,15 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(project["entity_hint"], "dashboard")
         self.assertEqual(contextual["intent"], "get_operational_summary")
 
+    def test_parse_operational_friction_queries(self):
+        stalled = parse_user_query("que viene estancado")
+        risky_client = parse_user_query("que me preocuparia de Cam")
+        contextual = parse_user_query("y que esta frenado?")
+        self.assertEqual(stalled["intent"], "get_operational_friction_summary")
+        self.assertEqual(risky_client["intent"], "get_operational_friction_summary")
+        self.assertEqual(risky_client["entity_hint"], "cam")
+        self.assertEqual(contextual["intent"], "get_operational_friction_summary")
+
     def test_parse_contextual_followups(self):
         projects = parse_user_query("y sus proyectos?")
         close_task = parse_user_query("cerrala")

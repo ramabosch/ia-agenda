@@ -123,8 +123,8 @@ def resolve_references(
 
     task_result = _resolve_task_reference(
         _raw_reference_for_scope(parsed_query, "task", entity_hint, context),
-        client_id=None if intent in {"clarify_entity_reference", "get_operational_summary"} else client_id,
-        project_id=None if intent in {"clarify_entity_reference", "get_operational_summary"} else project_id,
+        client_id=None if intent in {"clarify_entity_reference", "get_operational_summary", "get_operational_friction_summary"} else client_id,
+        project_id=None if intent in {"clarify_entity_reference", "get_operational_summary", "get_operational_friction_summary"} else project_id,
         user_query=user_query,
         context=context,
         follow_up_mode=follow_up_mode,
@@ -210,7 +210,10 @@ def resolve_references(
         ) or (
             bool(context)
             and intent == "clarify_entity_reference"
-            and ((entity_hint or "").strip().lower() in GENERIC_HINTS or normalize_entity_text(entity_hint) in GENERIC_HINTS)
+            and (
+                (entity_hint or "").strip().lower() in GENERIC_HINTS
+                or (normalize_entity_text(entity_hint) if entity_hint else "") in GENERIC_HINTS
+            )
             and not clarification_needed
             and scope != "none"
         ),
@@ -417,9 +420,9 @@ def _raw_reference_for_scope(
     explicit = parsed_query.get(f"{scope}_name")
     if explicit:
         return explicit
-    if parsed_query.get("intent") in {"clarify_entity_reference", "get_operational_summary"}:
+    if parsed_query.get("intent") in {"clarify_entity_reference", "get_operational_summary", "get_operational_friction_summary"}:
         raw_hint = (entity_hint or "").strip().lower()
-        normalized_hint = normalize_entity_text(entity_hint)
+        normalized_hint = normalize_entity_text(entity_hint) if entity_hint else ""
         if (raw_hint in GENERIC_HINTS or normalized_hint in GENERIC_HINTS) and context.get("scope") == scope and context.get(scope, {}).get("name"):
             return context[scope]["name"]
         return entity_hint
@@ -655,9 +658,11 @@ def _detect_clarification_need(
     if any(result["ambiguous"] for result in results.values()):
         return True, "ambiguous_matches"
 
-    if intent in {"clarify_entity_reference", "get_operational_summary"}:
+    if intent in {"clarify_entity_reference", "get_operational_summary", "get_operational_friction_summary"}:
         raw_hint = (entity_hint or "").strip().lower()
-        normalized_hint = normalize_entity_text(entity_hint)
+        normalized_hint = normalize_entity_text(entity_hint) if entity_hint else ""
+        if intent == "get_operational_friction_summary" and not raw_hint and not normalized_hint and not matched_scopes:
+            return False, None
         if not normalized_hint and raw_hint not in GENERIC_HINTS:
             return True, "generic_request"
         if (raw_hint in GENERIC_HINTS or normalized_hint in GENERIC_HINTS) and not resolved_scopes:

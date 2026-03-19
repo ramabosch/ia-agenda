@@ -581,6 +581,104 @@ def build_client_advanced_summary(client_name: str, projects: list, tasks: list,
     }
 
 
+def get_operational_friction_snapshot(today: date | None = None) -> dict:
+    today = today or date.today()
+    tasks = get_all_tasks_with_relations()
+    return build_friction_focus_from_tasks(tasks, today=today)
+
+
+def build_friction_focus_from_tasks(tasks: list, today: date | None = None) -> dict:
+    today = today or date.today()
+    items = [_serialize_task_for_executive(task, today) for task in tasks]
+    open_items = [item for item in items if item["status"] != "hecha"]
+    friction_items = [item for item in open_items if item["friction_score"] > 0]
+    stalled_items = [item for item in friction_items if item["has_strong_stall_signal"]]
+    probable_items = [item for item in friction_items if not item["has_strong_stall_signal"]]
+    prioritized = sorted(friction_items, key=_friction_rank_key)
+
+    return {
+        "today": today.isoformat(),
+        "tasks": items,
+        "open_tasks": open_items,
+        "friction_tasks": prioritized[:5],
+        "stalled_tasks": stalled_items[:5],
+        "probable_friction_tasks": probable_items[:5],
+        "strong_temporal_signals": [item for item in friction_items if item["has_temporal_signal"]][:5],
+        "heuristic": [
+            "riesgo alto: bloqueada, vieja o alta prioridad sin next_action",
+            "friccion media: en progreso vieja o abierta sin seguimiento",
+            "si falta dato temporal se habla de friccion probable, no de atraso exacto",
+        ],
+        "status_overview": _build_friction_status_overview(open_items, friction_items, stalled_items),
+        "recommendation": _build_friction_recommendation(prioritized),
+    }
+
+
+def build_task_friction_summary(summary: dict, today: date | None = None) -> dict:
+    today = today or date.today()
+    due_date = summary.get("due_date")
+    created_at = summary.get("created_at")
+    last_updated_at = summary.get("last_updated_at")
+    status = summary.get("status")
+    priority = summary.get("priority")
+    next_action = (summary.get("next_action") or "").strip() or None
+
+    age_days = _days_since(created_at, today)
+    update_days = _days_since(last_updated_at, today)
+    is_open = status != "hecha"
+    is_blocked = status == "bloqueada"
+    is_in_progress = status == "en_progreso"
+    is_high_priority = priority == TaskPriority.HIGH.value
+    has_temporal_signal = age_days is not None or update_days is not None or bool(due_date)
+    old_reference = update_days if update_days is not None else age_days
+    is_old_open = is_open and old_reference is not None and old_reference >= 14
+    is_old_blocked = is_blocked and old_reference is not None and old_reference >= 7
+    is_stale_in_progress = is_in_progress and old_reference is not None and old_reference >= 7
+    missing_next_action = is_open and not next_action
+
+    signals = _build_friction_signals(
+        is_blocked=is_blocked,
+        is_old_blocked=is_old_blocked,
+        is_stale_in_progress=is_stale_in_progress,
+        is_old_open=is_old_open,
+        is_high_priority=is_high_priority,
+        missing_next_action=missing_next_action,
+        has_temporal_signal=has_temporal_signal,
+    )
+
+    recommendation = _build_task_friction_recommendation(
+        is_old_blocked=is_old_blocked,
+        is_blocked=is_blocked,
+        is_stale_in_progress=is_stale_in_progress,
+        is_high_priority=is_high_priority,
+        missing_next_action=missing_next_action,
+        next_action=next_action,
+        has_temporal_signal=has_temporal_signal,
+    )
+
+    overview = "No veo señales claras de friccion en esta tarea."
+    if signals:
+        overview = "Veo señales de friccion en esta tarea."
+    if is_old_blocked or is_stale_in_progress or is_old_open:
+        overview = "Hay señales de estancamiento o atraso probable en esta tarea."
+    elif signals and not has_temporal_signal:
+        overview = "Veo friccion probable, pero no puedo afirmar atraso exacto con los datos actuales."
+
+    return {
+        "scope": "task",
+        "entity_name": summary.get("title"),
+        "status_overview": overview,
+        "signals": signals[:4],
+        "highlights": signals[:3],
+        "recommendation": recommendation,
+        "heuristic": [
+            "bloqueos viejos y progreso estancado pesan mas",
+            "alta prioridad sin next_action sube friccion",
+            "sin dato temporal solo se habla de friccion probable",
+        ],
+    }
+
+
 def _serialize_task_for_executive(task, today: date) -> dict:
     project = task.project
     client = project.client if project else None
@@ -599,11 +697,38 @@ def _serialize_task_for_executive(task, today: date) -> dict:
     missing_next_action = is_open and not has_next_action
     blocked_without_next_action = is_blocked and missing_next_action
     high_priority_without_next_action = is_high_priority and missing_next_action
+    created_at = getattr(task, "created_at", None)
+    last_updated_at = getattr(task, "last_updated_at", None)
+    age_days = _days_since(created_at, today)
+    update_days = _days_since(last_updated_at, today)
+    old_reference = update_days if update_days is not None else age_days
+    is_old_open = is_open and old_reference is not None and old_reference >= 14
+    is_old_blocked = is_blocked and old_reference is not None and old_reference >= 7
+    is_stale_in_progress = is_in_progress and old_reference is not None and old_reference >= 7
+    has_temporal_signal = age_days is not None or update_days is not None or bool(due_date)
     needs_followup = is_open and (
         blocked_without_next_action
         or high_priority_without_next_action
         or (is_overdue and missing_next_action)
         or (is_in_progress and missing_next_action)
+    )
+    friction_signals = _build_friction_signals(
+        is_blocked=is_blocked,
+        is_old_blocked=is_old_blocked,
+        is_stale_in_progress=is_stale_in_progress,
+        is_old_open=is_old_open,
+        is_high_priority=is_high_priority,
+        missing_next_action=missing_next_action,
+        has_temporal_signal=has_temporal_signal,
+    )
+    friction_score = _task_friction_score(
+        is_old_blocked=is_old_blocked,
+        is_blocked=is_blocked,
+        is_stale_in_progress=is_stale_in_progress,
+        is_old_open=is_old_open,
+        is_high_priority=is_high_priority,
+        missing_next_action=missing_next_action,
+        has_temporal_signal=has_temporal_signal,
     )
 
     return {
@@ -618,6 +743,11 @@ def _serialize_task_for_executive(task, today: date) -> dict:
         "project_name": project.name if project else "Sin proyecto",
         "client_id": client.id if client else None,
         "client_name": client.name if client else "Desconocido",
+        "created_at": created_at,
+        "last_updated_at": last_updated_at,
+        "age_days": age_days,
+        "days_since_update": update_days,
+        "has_temporal_signal": has_temporal_signal,
         "is_blocked": is_blocked,
         "is_due_today": is_due_today,
         "is_overdue": is_overdue,
@@ -628,7 +758,13 @@ def _serialize_task_for_executive(task, today: date) -> dict:
         "missing_next_action": missing_next_action,
         "blocked_without_next_action": blocked_without_next_action,
         "high_priority_without_next_action": high_priority_without_next_action,
+        "is_old_open": is_old_open,
+        "is_old_blocked": is_old_blocked,
+        "is_stale_in_progress": is_stale_in_progress,
+        "has_strong_stall_signal": is_old_blocked or is_stale_in_progress or is_old_open,
         "needs_followup": needs_followup,
+        "friction_signals": friction_signals,
+        "friction_score": friction_score,
         "score": _task_priority_score(
             is_blocked=is_blocked,
             is_overdue=is_overdue,
@@ -700,6 +836,18 @@ def _operational_summary_rank_key(item: dict) -> tuple:
     )
 
 
+def _friction_rank_key(item: dict) -> tuple:
+    due_sort = item["due_date"] or "9999-12-31"
+    return (
+        -item["friction_score"],
+        -int(item["has_temporal_signal"]),
+        due_sort,
+        item["client_name"],
+        item["project_name"],
+        item["title"],
+    )
+
+
 def _build_tasks_status_overview(open_items: list[dict], blocked_items: list[dict]) -> str:
     if not open_items:
         return "No veo tareas abiertas en este momento."
@@ -727,6 +875,34 @@ def _build_tasks_recommendation(prioritized_items: list[dict]) -> str:
     return f"Miraria primero '{top['title']}' por prioridad operativa."
 
 
+def _build_friction_status_overview(open_items: list[dict], friction_items: list[dict], stalled_items: list[dict]) -> str:
+    if not open_items:
+        return "No veo trabajo abierto con señales de friccion."
+
+    parts = [f"Hay {len(open_items)} tareas abiertas."]
+    if friction_items:
+        parts.append(f"{len(friction_items)} muestran friccion operativa.")
+    if stalled_items:
+        parts.append(f"{len(stalled_items)} tienen senales mas fuertes de estancamiento.")
+    return " ".join(parts)
+
+
+def _build_friction_recommendation(prioritized_items: list[dict]) -> str:
+    if not prioritized_items:
+        return "No veo un foco claro de friccion para empujar ahora."
+
+    top = prioritized_items[0]
+    if top["is_old_blocked"]:
+        return f"Primero destrabaria '{top['title']}', porque combina bloqueo y senal temporal de atraso."
+    if top["is_stale_in_progress"]:
+        return f"Revisaria '{top['title']}', porque lleva demasiado en progreso sin una senal clara de avance."
+    if top["high_priority_without_next_action"]:
+        return f"Definiria una proxima accion concreta para '{top['title']}', porque sigue prioritaria pero mal seguida."
+    if top["missing_next_action"]:
+        return f"Ordenaria el seguimiento de '{top['title']}' antes de que siga acumulando friccion."
+    return f"Miraria '{top['title']}' como principal foco de friccion probable."
+
+
 def _build_task_recommendation(
     *,
     is_open: bool,
@@ -743,3 +919,95 @@ def _build_task_recommendation(
     if is_high_priority:
         return "Definiria una proxima accion concreta hoy, porque sigue siendo prioritaria."
     return "Definiria el siguiente paso mas concreto antes de mover otras cosas."
+
+
+def _build_task_friction_recommendation(
+    *,
+    is_old_blocked: bool,
+    is_blocked: bool,
+    is_stale_in_progress: bool,
+    is_high_priority: bool,
+    missing_next_action: bool,
+    next_action: str | None,
+    has_temporal_signal: bool,
+) -> str:
+    if is_old_blocked:
+        return "La prioridad seria destrabarla cuanto antes: ya hay senal de bloqueo sostenido."
+    if is_blocked:
+        return "La prioridad seria destrabarla; hoy es una fuente clara de friccion."
+    if is_stale_in_progress:
+        return "Yo revisaria si sigue bien encarada o si necesita redefinicion, porque parece demasiado tiempo en progreso."
+    if is_high_priority and missing_next_action:
+        return "Definiria una proxima accion concreta hoy, porque sigue prioritaria pero sin seguimiento claro."
+    if missing_next_action and not has_temporal_signal:
+        return "Veo friccion probable por falta de seguimiento, aunque no puedo afirmar atraso exacto."
+    if next_action:
+        return f"El proximo paso existente es '{next_action}', asi que revisaria por que no se esta moviendo."
+    return "La miraria de cerca, pero con los datos actuales no puedo afirmar un atraso fuerte."
+
+
+def _task_friction_score(
+    *,
+    is_old_blocked: bool,
+    is_blocked: bool,
+    is_stale_in_progress: bool,
+    is_old_open: bool,
+    is_high_priority: bool,
+    missing_next_action: bool,
+    has_temporal_signal: bool,
+) -> int:
+    score = 0
+    if is_old_blocked:
+        score += 100
+    elif is_blocked:
+        score += 70
+    if is_stale_in_progress:
+        score += 75
+    if is_old_open:
+        score += 55
+    if is_high_priority and missing_next_action:
+        score += 60
+    elif missing_next_action:
+        score += 30
+    if not has_temporal_signal and score > 0:
+        score -= 10
+    return max(score, 0)
+
+
+def _build_friction_signals(
+    *,
+    is_blocked: bool,
+    is_old_blocked: bool,
+    is_stale_in_progress: bool,
+    is_old_open: bool,
+    is_high_priority: bool,
+    missing_next_action: bool,
+    has_temporal_signal: bool,
+) -> list[str]:
+    signals: list[str] = []
+    if is_old_blocked:
+        signals.append("bloqueada hace tiempo")
+    elif is_blocked:
+        signals.append("bloqueada")
+    if is_stale_in_progress:
+        signals.append("en progreso hace demasiado")
+    if is_old_open:
+        signals.append("abierta hace bastante sin cierre")
+    if is_high_priority and missing_next_action:
+        signals.append("alta prioridad sin proxima accion")
+    elif missing_next_action:
+        signals.append("sin proxima accion clara")
+    if signals and not has_temporal_signal and any(signal in signals for signal in ("sin proxima accion clara", "alta prioridad sin proxima accion")):
+        signals.append("friccion probable sin evidencia temporal fuerte")
+    return signals
+
+
+def _days_since(value, today: date) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, date) and not hasattr(value, "hour"):
+        return (today - value).days
+    try:
+        return (today - value.date()).days
+    except Exception:
+        return None
