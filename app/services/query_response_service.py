@@ -130,6 +130,10 @@ CONTINUITY_INTENTS = {
     "get_client_facing_summary",
 }
 
+AUDIT_INTENTS = {
+    "get_audit_trace_summary",
+}
+
 UNSAFE_COMPOUND_INTENTS = CREATION_INTENTS | TASK_UPDATE_INTENTS | {
     "add_task_update",
     "add_task_update_by_name",
@@ -141,6 +145,7 @@ def build_response_from_query(
     user_query: str | None = None,
     conversation_context: dict | None = None,
 ) -> str:
+    parsed_query["_last_user_query"] = user_query
     intent = parsed_query.get("intent")
     if intent == "compound_query":
         return _handle_compound_query(
@@ -180,6 +185,13 @@ def build_response_from_query(
 
     if intent in CONTINUITY_INTENTS:
         return _handle_conversational_continuity_intent(
+            parsed_query,
+            user_query=user_query,
+            conversation_context=conversation_context,
+        )
+
+    if intent in AUDIT_INTENTS:
+        return _handle_audit_trace_intent(
             parsed_query,
             user_query=user_query,
             conversation_context=conversation_context,
@@ -590,9 +602,17 @@ def _finalize_update_response(parsed_query: dict, resolved_references: dict, upd
     new_value = result.get("new_value") or "vacio"
 
     if result["field"] == "status" and old_value == new_value and result.get("reason"):
-        return f"Listo. La tarea '{result['task_title']}' sigue en estado '{new_value}', y ademas registre la nota '{result['reason']}'."
+        response = f"Listo. La tarea '{result['task_title']}' sigue en estado '{new_value}', y ademas registre la nota '{result['reason']}'."
+    else:
+        response = f"Listo. Actualice la tarea '{result['task_title']}'. Cambio {field_labels.get(result['field'], result['field'])}: '{old_value}' -> '{new_value}'."
 
-    return f"Listo. Actualice la tarea '{result['task_title']}'. Cambio {field_labels.get(result['field'], result['field'])}: '{old_value}' -> '{new_value}'."
+    _set_audit_trace(
+        parsed_query,
+        user_query=parsed_query.get("_last_user_query"),
+        response=response,
+        action_status="executed" if result.get("updated") else "degraded",
+    )
+    return response
 
 
 def _handle_compound_query(
@@ -649,7 +669,16 @@ def _handle_compound_query(
     parsed_query["_compound_degraded_parts"] = degraded_parts
     parsed_query["_compound_reused_snapshot"] = reused_snapshot
     parsed_query["_compound_partial_clarification"] = partial_clarification
-    return "\n\n".join(sections)
+    response = "\n\n".join(sections)
+    _set_audit_trace(
+        parsed_query,
+        user_query=user_query,
+        response=response,
+        action_status="degraded" if degraded_parts else "informational",
+        action_type="compound_query",
+        reason=", ".join(degraded_parts) if degraded_parts else None,
+    )
+    return response
 
 
 def _is_degraded_compound_part(parsed_query: dict, response: str) -> bool:
@@ -749,7 +778,16 @@ def _handle_project_note_creation(
         **_base_conversation_context(parsed_query, "project"),
         "project": {"id": project["id"], "name": project["name"]},
     }
-    return f"Listo. Agregue una nota al proyecto '{project['name']}'. Contenido: '{note_content}'."
+    response = f"Listo. Agregue una nota al proyecto '{project['name']}'. Contenido: '{note_content}'."
+    _set_audit_trace(
+        parsed_query,
+        user_query=parsed_query.get("_last_user_query"),
+        response=response,
+        action_status="executed",
+        action_type="project_note",
+        affected_entity={"scope": "project", "id": project["id"], "name": project["name"]},
+    )
+    return response
 
 
 def _handle_task_creation(
@@ -821,7 +859,16 @@ def _handle_task_creation(
         parts.append(f"Vence: {temporal_resolution['due_date'].isoformat()}.")
     if note_content:
         parts.append(f"Nota inicial: {note_content}.")
-    return " ".join(parts)
+    response = " ".join(parts)
+    _set_audit_trace(
+        parsed_query,
+        user_query=parsed_query.get("_last_user_query"),
+        response=response,
+        action_status="executed",
+        action_type=parsed_query.get("intent"),
+        affected_entity={"scope": "task", "id": result["task_id"], "name": result["task_title"]},
+    )
+    return response
 
 
 def _resolve_created_task_title(parsed_query: dict, conversation_context: dict | None) -> str | None:
@@ -1832,6 +1879,38 @@ def _handle_conversational_continuity_intent(
     return _abort_with_context(parsed_query, "No pude interpretar ese follow-up conversacional con seguridad.")
 
 
+def _handle_audit_trace_intent(
+    parsed_query: dict,
+    *,
+    user_query: str | None,
+    conversation_context: dict | None,
+) -> str:
+    trace = _get_recent_audit_trace(conversation_context)
+    if not trace:
+        return _abort_with_context(parsed_query, "No tengo una traza reciente y segura para auditar ese turno.")
+
+    focus = parsed_query.get("audit_focus") or "recent"
+    parsed_query["_audit_focus"] = focus
+    parsed_query["_audit_source"] = "current_context"
+    parsed_query["_audit_trace"] = trace
+    parsed_query["_conversation_context"] = {
+        **_base_conversation_context(parsed_query, trace.get("scope") or "none"),
+        "audit_trace": trace,
+    }
+
+    if focus == "resolution":
+        return _format_audit_resolution(trace)
+    if focus == "blocked":
+        return _format_audit_blocked(trace)
+    if focus == "understood":
+        return _format_audit_understood(trace)
+    if focus == "action":
+        return _format_audit_action(trace)
+    if focus == "decision_reason":
+        return _format_audit_reason(trace)
+    return _format_audit_recent(trace)
+
+
 def _format_scoped_followup_list(parsed_query: dict, *, scope: str, scope_name: str, tasks: list) -> str:
     items = _build_followup_items_from_tasks(tasks)
     open_items = [item for item in items if item["status"] != "hecha"]
@@ -2318,6 +2397,9 @@ def _resolve_if_needed(parsed_query: dict, user_query: str | None, conversation_
         parsed_query["_clarification_reason"] = None
         parsed_query["_clarification_candidates"] = []
         parsed_query["_candidate_types"] = []
+        parsed_query["_expected_scope"] = parsed_query.get("expected_scope")
+        parsed_query["_secondary_descriptor"] = parsed_query.get("secondary_descriptor")
+        parsed_query["_used_previous_candidates"] = False
         parsed_query["_used_context_to_disambiguate"] = False
         parsed_query["_recent_context_used"] = {}
         parsed_query["_context_source"] = "none"
@@ -2353,6 +2435,9 @@ def _resolve_if_needed(parsed_query: dict, user_query: str | None, conversation_
     parsed_query["_clarification_reason"] = resolved.get("clarification_reason")
     parsed_query["_clarification_candidates"] = resolved.get("clarification_candidates", [])
     parsed_query["_candidate_types"] = resolved.get("candidate_types", [])
+    parsed_query["_expected_scope"] = parsed_query.get("expected_scope")
+    parsed_query["_secondary_descriptor"] = parsed_query.get("secondary_descriptor")
+    parsed_query["_used_previous_candidates"] = bool(parsed_query.get("use_previous_candidates")) and bool((conversation_context or {}).get("clarification_candidates"))
     parsed_query["_used_context_to_disambiguate"] = resolved.get("used_context_to_disambiguate", False)
     parsed_query["_recent_context_used"] = resolved.get("context", {})
     parsed_query["_context_source"] = resolved.get("context_source", "none")
@@ -2394,6 +2479,7 @@ def _require_resolved_entity(resolved_references: dict, scope: str, label: str, 
 def _build_clarification_response(resolved_references: dict, prefix: str | None = None) -> str:
     reason = resolved_references.get("clarification_reason")
     candidates = resolved_references.get("clarification_candidates") or []
+    candidate_types = resolved_references.get("candidate_types") or []
 
     if reason == "missing_context":
         return "No tengo contexto aislado actual suficiente para resolver esa referencia. Decime el cliente, proyecto o tarea exacta."
@@ -2410,10 +2496,19 @@ def _build_clarification_response(resolved_references: dict, prefix: str | None 
             "Proba con el nombre del cliente, proyecto o tarea exacta."
         )
 
-    lines = [prefix or "Necesito que me aclares a que te referis."]
+    if len(candidate_types) == 1:
+        lines = [prefix or f"Necesito que me aclares cual {_scope_label(candidate_types[0])} queres."]
+    else:
+        lines = [prefix or "Necesito que me aclares a que te referis."]
     lines.append("Vi estas coincidencias posibles:")
-    for item in candidates[:6]:
-        lines.append(f"- {item['name']} ({_scope_label(item['scope'])})")
+    for item in candidates[:4]:
+        scope_label = _scope_label(item["scope"])
+        detail_parts = [scope_label]
+        if item.get("client_name"):
+            detail_parts.append(f"cliente: {item['client_name']}")
+        if item.get("project_name"):
+            detail_parts.append(f"proyecto: {item['project_name']}")
+        lines.append(f"- {item['name']} ({' | '.join(detail_parts)})")
     lines.append("")
     lines.append("Si queres, te lo puedo resumir, actualizar o mostrar proximos pasos del que elijas.")
     return "\n".join(lines)
@@ -3129,8 +3224,212 @@ def _operational_reason_label(item: dict) -> str:
     return ", ".join(reasons)
 
 
+def _set_audit_trace(
+    parsed_query: dict,
+    *,
+    user_query: str | None,
+    response: str,
+    action_status: str,
+    action_type: str | None = None,
+    affected_entity: dict | None = None,
+    reason: str | None = None,
+    summary: str | None = None,
+) -> None:
+    resolved = parsed_query.get("_resolved_references", {}) or {}
+    trace = {
+        "user_query": user_query,
+        "intent": parsed_query.get("intent"),
+        "sub_intents": [item.get("intent") for item in parsed_query.get("subqueries", [])[:2]],
+        "scope": parsed_query.get("_resolver_scope") or parsed_query.get("_summary_scope") or parsed_query.get("_friction_scope") or parsed_query.get("_recommendation_scope") or parsed_query.get("_temporal_scope") or parsed_query.get("_followup_scope") or parsed_query.get("_executive_scope") or resolved.get("scope") or "none",
+        "resolved_entities": _audit_resolved_entities(resolved),
+        "candidates": parsed_query.get("_clarification_candidates", []),
+        "clarification_needed": bool(parsed_query.get("_clarification_needed")),
+        "action_type": action_type or _infer_audit_action_type(parsed_query),
+        "action_status": action_status,
+        "affected_entity": affected_entity or _infer_audit_affected_entity(parsed_query, resolved),
+        "reason": reason or _infer_audit_reason(parsed_query),
+        "summary": summary or _shorten_text(response),
+    }
+    parsed_query["_audit_trace"] = trace
+
+    context = parsed_query.get("_conversation_context")
+    if not isinstance(context, dict):
+        context = _base_conversation_context(parsed_query, trace["scope"])
+    context["audit_trace"] = trace
+    parsed_query["_conversation_context"] = context
+
+
+def _audit_resolved_entities(resolved: dict) -> dict:
+    items = {}
+    for scope in ("client", "project", "task"):
+        item = (resolved.get(scope) or {}).get("resolved")
+        if item:
+            items[scope] = item
+    return items
+
+
+def _infer_audit_action_type(parsed_query: dict) -> str:
+    if parsed_query.get("_creation_real"):
+        return parsed_query.get("_creation_intent") or "create"
+    if parsed_query.get("_update_real"):
+        return parsed_query.get("_update_type") or "update"
+    if parsed_query.get("_clarification_needed"):
+        return "clarification"
+    if parsed_query.get("_security_blocked"):
+        return "blocked"
+    if parsed_query.get("_adaptive_degraded") or parsed_query.get("_temporal_degraded") or parsed_query.get("_creation_aborted"):
+        return "degraded"
+    return "informational"
+
+
+def _infer_audit_affected_entity(parsed_query: dict, resolved: dict) -> dict | None:
+    if parsed_query.get("_creation_result"):
+        result = parsed_query["_creation_result"]
+        if isinstance(result, dict):
+            if result.get("task_id") or result.get("task_title"):
+                return {"scope": "task", "id": result.get("task_id"), "name": result.get("task_title")}
+            if result.get("project_id") or result.get("project_name"):
+                return {"scope": "project", "id": result.get("project_id"), "name": result.get("project_name")}
+    if parsed_query.get("_update_result"):
+        result = parsed_query["_update_result"]
+        if isinstance(result, dict):
+            if result.get("task_id") or result.get("task_title"):
+                return {"scope": "task", "id": result.get("task_id"), "name": result.get("task_title")}
+    for scope in ("task", "project", "client"):
+        item = (resolved.get(scope) or {}).get("resolved")
+        if item:
+            return {"scope": scope, "id": item.get("id"), "name": item.get("name")}
+    return None
+
+
+def _infer_audit_reason(parsed_query: dict) -> str | None:
+    snapshot = parsed_query.get("_response_snapshot")
+    if isinstance(snapshot, dict):
+        recommendations = snapshot.get("recommendations") or []
+        if recommendations:
+            top = recommendations[0]
+            title = top.get("title") or "esa recomendacion"
+            reasons = top.get("recommendation_reasons") or []
+            if reasons:
+                return f"priorice '{title}' porque " + ", ".join(reasons[:3])
+            if top.get("missing_next_action"):
+                return f"priorice '{title}' porque necesitaba ordenar una proxima accion clara"
+
+    creation_result = parsed_query.get("_creation_result")
+    if isinstance(creation_result, dict) and creation_result.get("error"):
+        creation_error = creation_result.get("error")
+    else:
+        creation_error = None
+
+    compound_degraded = parsed_query.get("_compound_degraded_parts")
+    if isinstance(compound_degraded, list) and compound_degraded:
+        compound_reason = ", ".join(str(item) for item in compound_degraded)
+    else:
+        compound_reason = None
+
+    return (
+        parsed_query.get("_security_reason")
+        or parsed_query.get("_clarification_reason")
+        or creation_error
+        or compound_reason
+    )
+
+
+def _shorten_text(response: str | None, *, max_lines: int = 3) -> str:
+    if not response:
+        return ""
+    lines = [line.strip() for line in str(response).splitlines() if line.strip()]
+    return " ".join(lines[:max_lines])
+
+
+def _get_recent_audit_trace(conversation_context: dict | None) -> dict | None:
+    context = conversation_context or {}
+    if isinstance(context, dict) and context.get("_isolated") and isinstance(context.get("audit_trace"), dict):
+        return context["audit_trace"]
+    return None
+
+
+def _format_audit_recent(trace: dict) -> str:
+    action_type = trace.get("action_type") or "consulta"
+    action_status = trace.get("action_status") or "informational"
+    if action_status == "executed":
+        return f"Recien ejecute '{action_type}'. Resumen: {trace.get('summary')}"
+    if action_status == "blocked":
+        return f"Recien no ejecute nada: quedo bloqueado por {trace.get('reason') or 'seguridad'}. Resumen: {trace.get('summary')}"
+    if action_status == "degraded":
+        return f"Recien respondi en modo degradado. Motivo: {trace.get('reason') or 'falta de contexto o precision'}. Resumen: {trace.get('summary')}"
+    return f"Recien respondi una consulta de tipo '{trace.get('intent')}'. Resumen: {trace.get('summary')}"
+
+
+def _format_audit_resolution(trace: dict) -> str:
+    resolved = trace.get("resolved_entities") or {}
+    if not resolved:
+        return "No llegue a resolver una entidad clara en el ultimo turno."
+    parts = []
+    for scope in ("client", "project", "task"):
+        item = resolved.get(scope)
+        if item:
+            parts.append(f"{_scope_label(scope)}: {item.get('name')}")
+    return "Esto fue lo que resolvi en el ultimo turno: " + " | ".join(parts)
+
+
+def _format_audit_blocked(trace: dict) -> str:
+    if trace.get("action_status") != "blocked":
+        return "En el ultimo turno no quedo nada bloqueado por seguridad."
+    candidates = trace.get("candidates") or []
+    lines = [f"En el ultimo turno bloquee la accion. Motivo: {trace.get('reason') or 'seguridad'}."]
+    if candidates:
+        lines.append("Candidatos involucrados:")
+        for item in candidates[:4]:
+            lines.append(f"- {item.get('name')} ({_scope_label(item.get('scope'))})")
+    return "\n".join(lines)
+
+
+def _format_audit_understood(trace: dict) -> str:
+    parts = [f"Entendi el intent '{trace.get('intent')}'."]
+    if trace.get("sub_intents"):
+        parts.append(f"Sub-intents: {', '.join(item for item in trace['sub_intents'] if item)}.")
+    if trace.get("resolved_entities"):
+        parts.append(_format_audit_resolution(trace))
+    elif trace.get("candidates"):
+        parts.append("No resolvi una entidad unica; quede entre varios candidatos.")
+    return " ".join(parts)
+
+
+def _format_audit_action(trace: dict) -> str:
+    if trace.get("action_status") != "executed":
+        return "En el ultimo turno no ejecute una accion operativa."
+    affected = trace.get("affected_entity") or {}
+    if affected.get("name"):
+        return f"En el ultimo turno ejecute '{trace.get('action_type')}' sobre {affected.get('name')}."
+    return f"En el ultimo turno ejecute '{trace.get('action_type')}'."
+
+
+def _format_audit_reason(trace: dict) -> str:
+    reason = trace.get("reason")
+    if reason:
+        return f"La razon principal del ultimo turno fue: {reason}."
+    return f"La razon operativa que deje fue: {trace.get('summary')}"
+
+
 def _abort_with_context(parsed_query: dict, message: str) -> str:
-    parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
+    context = _base_conversation_context(parsed_query, "none")
+    clarification_candidates = parsed_query.get("_clarification_candidates") or []
+    if clarification_candidates:
+        context["clarification_candidates"] = clarification_candidates
+        context["clarification_reason"] = parsed_query.get("_clarification_reason")
+        if parsed_query.get("expected_scope"):
+            context["clarification_expected_scope"] = parsed_query.get("expected_scope")
+        elif parsed_query.get("_candidate_types") and len(parsed_query["_candidate_types"]) == 1:
+            context["clarification_expected_scope"] = parsed_query["_candidate_types"][0]
+    parsed_query["_conversation_context"] = context
+    action_status = "blocked" if parsed_query.get("_security_blocked") or parsed_query.get("_clarification_needed") else "degraded"
+    _set_audit_trace(
+        parsed_query,
+        user_query=parsed_query.get("_last_user_query"),
+        response=message,
+        action_status=action_status,
+    )
     return message
 
 
@@ -3254,6 +3553,12 @@ def _store_response_snapshot(parsed_query: dict, snapshot: dict) -> None:
     context["response_snapshot"] = snapshot
     context["last_response_kind"] = snapshot.get("response_kind")
     parsed_query["_conversation_context"] = context
+    _set_audit_trace(
+        parsed_query,
+        user_query=parsed_query.get("_last_user_query"),
+        response=snapshot.get("status_overview") or snapshot.get("recommendation") or snapshot.get("response_kind") or "",
+        action_status="executed" if parsed_query.get("_creation_real") or parsed_query.get("_update_real") else "informational",
+    )
 
 
 def _remember_context(
