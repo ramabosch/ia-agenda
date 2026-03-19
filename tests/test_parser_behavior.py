@@ -38,6 +38,16 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(missing_next["intent"], "get_missing_next_actions_summary")
         self.assertEqual(push_today["intent"], "get_push_today_summary")
 
+    def test_parse_operational_summary_queries(self):
+        client = parse_user_query("comentame en que andamos con Cam")
+        project = parse_user_query("como viene dashboard")
+        contextual = parse_user_query("que es lo mas importante aca")
+        self.assertEqual(client["intent"], "get_operational_summary")
+        self.assertEqual(client["entity_hint"], "cam")
+        self.assertEqual(project["intent"], "get_operational_summary")
+        self.assertEqual(project["entity_hint"], "dashboard")
+        self.assertEqual(contextual["intent"], "get_operational_summary")
+
     def test_parse_contextual_followups(self):
         projects = parse_user_query("y sus proyectos?")
         close_task = parse_user_query("cerrala")

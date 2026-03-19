@@ -37,8 +37,8 @@ def parse_user_query(query: str) -> dict:
     normalized = query.strip().lower()
 
     result = (
-        _parse_ambiguity_intents(normalized)
-        or _parse_read_intents(normalized)
+        _parse_read_intents(normalized)
+        or _parse_ambiguity_intents(normalized)
         or _parse_task_update_intents(normalized)
         or _parse_today_intents(normalized)
     )
@@ -82,6 +82,83 @@ def _parse_ambiguity_intents(normalized: str) -> dict | None:
 
 
 def _parse_read_intents(normalized: str) -> dict | None:
+    if any(
+        phrase in normalized
+        for phrase in [
+            "comentame en que andamos con ",
+            "comentame en qué andamos con ",
+            "dame un resumen operativo de ",
+            "que me preocuparia de ",
+            "que me preocuparía de ",
+            "que esta pasando con ",
+            "qué está pasando con ",
+            "como estamos con ",
+            "cómo estamos con ",
+        ]
+    ):
+        match = re.search(
+            r"(?:comentame en que andamos con|comentame en qué andamos con|dame un resumen operativo de|que me preocuparia de|que me preocuparía de|que esta pasando con|qué está pasando con|como estamos con|cómo estamos con)\s+(.+)$",
+            normalized,
+        )
+        if match:
+            return {"intent": "get_operational_summary", "entity_hint": match.group(1).strip()}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "como viene ",
+            "cómo viene ",
+        ]
+    ):
+        match = re.search(r"(?:como viene|cómo viene)\s+(.+)$", normalized)
+        if match:
+            target = match.group(1).strip()
+            if target in {"esto", "aca", "acá"}:
+                return {"intent": "get_operational_summary", "entity_hint": target}
+            return {"intent": "get_operational_summary", "entity_hint": target}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "resumime lo importante de este proyecto",
+            "resumime lo importante de ese proyecto",
+        ]
+    ):
+        project_name = "este proyecto" if "este proyecto" in normalized else "ese proyecto"
+        return {"intent": "get_operational_summary", "project_name": project_name}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que es lo mas importante aca",
+            "qué es lo más importante acá",
+            "que es lo mas importante de esta tarea",
+            "qué es lo más importante de esta tarea",
+            "y como estamos",
+            "y cómo estamos",
+            "como viene esto",
+            "cómo viene esto",
+        ]
+    ):
+        if "esta tarea" in normalized:
+            return {"intent": "get_operational_summary", "task_name": "esta tarea"}
+        return {"intent": "get_operational_summary", "entity_hint": "aca"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que me preocuparia de este cliente",
+            "qué me preocuparía de este cliente",
+            "que esta pasando con este proyecto",
+            "qué está pasando con este proyecto",
+            "que esta pasando con este cliente",
+            "qué está pasando con este cliente",
+        ]
+    ):
+        if "proyecto" in normalized:
+            return {"intent": "get_operational_summary", "project_name": "este proyecto"}
+        return {"intent": "get_operational_summary", "client_name": "este cliente"}
+
     if any(
         phrase in normalized
         for phrase in [
@@ -308,7 +385,7 @@ def _parse_read_intents(normalized: str) -> dict | None:
 
     if normalized.startswith("resumime "):
         target = normalized.removeprefix("resumime ").strip()
-        if target and not target.startswith(("el cliente ", "la tarea ", "el proyecto ")):
+        if target and not target.startswith(("el cliente ", "la tarea ", "el proyecto ", "lo ")):
             return {"intent": "get_task_summary", "task_name": target}
 
     if any(

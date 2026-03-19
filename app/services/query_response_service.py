@@ -6,12 +6,15 @@ from app.services.conversation_service import (
 from app.services.project_service import (
     get_executive_project_snapshot,
     get_followup_project_snapshot,
+    get_project_advanced_summary,
     get_project_operational_summary,
     get_projects_by_client_id,
 )
 from app.services.reference_resolver import resolve_references
 from app.services.task_service import (
     add_task_note_conversational,
+    build_client_advanced_summary,
+    build_task_advanced_summary,
     get_executive_task_snapshot,
     get_followup_task_snapshot,
     get_open_tasks_by_client_id,
@@ -28,6 +31,7 @@ from app.services.task_update_service import create_task_update
 
 REFERENCE_AWARE_INTENTS = {
     "clarify_entity_reference",
+    "get_operational_summary",
     "get_open_tasks_by_client_name",
     "get_projects_by_client_name",
     "get_tasks_by_client_name",
@@ -86,6 +90,14 @@ def build_response_from_query(
     if intent == "clarify_entity_reference":
         return _handle_clarification_intent(parsed_query, resolved_references)
 
+    if intent == "get_operational_summary":
+        return _handle_operational_summary_intent(
+            parsed_query,
+            resolved_references,
+            user_query=user_query,
+            conversation_context=conversation_context,
+        )
+
     if intent == "get_active_clients":
         clients = get_active_clients()
         parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
@@ -111,19 +123,10 @@ def build_response_from_query(
         client = resolved_references["client"]["resolved"]
         projects = get_projects_by_client_id(client["id"])
         tasks = get_tasks_by_client_id(client["id"])
-        open_tasks = [task for task in tasks if task.status != "hecha"]
-        blocked_tasks = [task for task in tasks if task.status == "bloqueada"]
-
         _remember_context(parsed_query, resolved_references, focus_scope="client", projects=projects)
-        return "\n".join(
-            [
-                f"Resumen del cliente {client['name']}:",
-                f"Proyectos: {len(projects)}",
-                f"Tareas totales: {len(tasks)}",
-                f"Tareas abiertas: {len(open_tasks)}",
-                f"Tareas bloqueadas: {len(blocked_tasks)}",
-            ]
-        )
+        advanced_summary = build_client_advanced_summary(client["name"], projects, tasks)
+        _attach_operational_summary_debug(parsed_query, advanced_summary)
+        return _format_advanced_client_summary(advanced_summary)
 
     if intent == "get_open_tasks_by_client_name":
         client_message = _require_resolved_entity(resolved_references, "client", "cliente", action_text="mirar pendientes")
@@ -181,7 +184,9 @@ def build_response_from_query(
             if not summary:
                 return _abort_with_context(parsed_query, f"No encontre una tarea con ID {task_id}.")
             _remember_context_from_summary(parsed_query, summary, "task")
-            return _format_task_summary(summary)
+            advanced_summary = build_task_advanced_summary(summary)
+            _attach_operational_summary_debug(parsed_query, advanced_summary)
+            return _format_advanced_task_summary(summary, advanced_summary)
 
         task_message = _require_resolved_entity(resolved_references, "task", "tarea", action_text="resumir")
         if task_message:
@@ -191,7 +196,9 @@ def build_response_from_query(
         if not summary:
             return _abort_with_context(parsed_query, "Encontre la tarea, pero no pude cargar su resumen operativo.")
         _remember_context_from_summary(parsed_query, summary, "task")
-        return _format_task_summary(summary)
+        advanced_summary = build_task_advanced_summary(summary)
+        _attach_operational_summary_debug(parsed_query, advanced_summary)
+        return _format_advanced_task_summary(summary, advanced_summary)
 
     if intent == "get_project_summary":
         project_id = parsed_query.get("project_id")
@@ -200,7 +207,11 @@ def build_response_from_query(
             if not summary:
                 return _abort_with_context(parsed_query, f"No encontre un proyecto con ID {project_id}.")
             _remember_context_from_project_summary(parsed_query, summary)
-            return _format_project_summary(summary)
+            advanced_summary = get_project_advanced_summary(project_id)
+            if not advanced_summary:
+                return _format_project_summary(summary)
+            _attach_operational_summary_debug(parsed_query, advanced_summary)
+            return _format_advanced_project_summary(summary, advanced_summary)
 
         project_message = _require_resolved_entity(resolved_references, "project", "proyecto", action_text="resumir")
         if project_message:
@@ -209,14 +220,20 @@ def build_response_from_query(
                 task_summary = get_task_operational_summary(task_fallback["id"])
                 if task_summary:
                     _remember_context_from_summary(parsed_query, task_summary, "task")
-                    return "No encontre un proyecto con ese nombre, pero si encontre una tarea muy parecida.\n\n" + _format_task_summary(task_summary)
+                    advanced_task = build_task_advanced_summary(task_summary)
+                    _attach_operational_summary_debug(parsed_query, advanced_task)
+                    return "No encontre un proyecto con ese nombre, pero si encontre una tarea muy parecida.\n\n" + _format_advanced_task_summary(task_summary, advanced_task)
             return _abort_with_context(parsed_query, project_message)
 
         summary = get_project_operational_summary(resolved_references["project"]["resolved"]["id"])
         if not summary:
             return _abort_with_context(parsed_query, "Encontre el proyecto, pero no pude cargar su resumen operativo.")
         _remember_context_from_project_summary(parsed_query, summary)
-        return _format_project_summary(summary)
+        advanced_summary = get_project_advanced_summary(resolved_references["project"]["resolved"]["id"])
+        if not advanced_summary:
+            return _format_project_summary(summary)
+        _attach_operational_summary_debug(parsed_query, advanced_summary)
+        return _format_advanced_project_summary(summary, advanced_summary)
 
     if intent == "get_projects_by_client_name":
         client_message = _require_resolved_entity(resolved_references, "client", "cliente", action_text="listar proyectos")
@@ -630,6 +647,118 @@ def _handle_clarification_intent(parsed_query: dict, resolved_references: dict) 
         )
 
     return _abort_with_context(parsed_query, _build_clarification_response(resolved_references))
+
+
+def _handle_operational_summary_intent(
+    parsed_query: dict,
+    resolved_references: dict,
+    *,
+    user_query: str | None,
+    conversation_context: dict | None,
+) -> str:
+    context = conversation_context or {}
+    contextual_scope = _preferred_contextual_summary_scope(user_query, context)
+    if contextual_scope:
+        scoped_response = _build_contextual_operational_summary(parsed_query, context, contextual_scope)
+        if scoped_response:
+            return scoped_response
+
+    if resolved_references.get("security_blocked"):
+        return _abort_with_context(
+            parsed_query,
+            "No tengo contexto aislado actual suficiente para resumir eso con seguridad. Decime el cliente, proyecto o tarea exacta.",
+        )
+
+    if resolved_references.get("clarification_needed") or resolved_references.get("ambiguous"):
+        return _abort_with_context(parsed_query, _build_clarification_response(resolved_references))
+
+    if resolved_references.get("task", {}).get("resolved"):
+        task_id = resolved_references["task"]["resolved"]["id"]
+        summary = get_task_operational_summary(task_id)
+        if not summary:
+            return _abort_with_context(parsed_query, "Encontre la tarea, pero no pude cargar su resumen operativo.")
+        _remember_context_from_summary(parsed_query, summary, "task")
+        advanced_summary = build_task_advanced_summary(summary)
+        _attach_operational_summary_debug(parsed_query, advanced_summary)
+        return _format_advanced_task_summary(summary, advanced_summary)
+
+    if resolved_references.get("project", {}).get("resolved"):
+        project_id = resolved_references["project"]["resolved"]["id"]
+        summary = get_project_operational_summary(project_id)
+        if not summary:
+            return _abort_with_context(parsed_query, "Encontre el proyecto, pero no pude cargar su resumen operativo.")
+        advanced_summary = get_project_advanced_summary(project_id)
+        _remember_context_from_project_summary(parsed_query, summary)
+        if not advanced_summary:
+            return _format_project_summary(summary)
+        _attach_operational_summary_debug(parsed_query, advanced_summary)
+        return _format_advanced_project_summary(summary, advanced_summary)
+
+    if resolved_references.get("client", {}).get("resolved"):
+        client = resolved_references["client"]["resolved"]
+        projects = get_projects_by_client_id(client["id"])
+        tasks = get_tasks_by_client_id(client["id"])
+        _remember_context(parsed_query, resolved_references, focus_scope="client", projects=projects)
+        advanced_summary = build_client_advanced_summary(client["name"], projects, tasks)
+        _attach_operational_summary_debug(parsed_query, advanced_summary)
+        return _format_advanced_client_summary(advanced_summary)
+
+    return _abort_with_context(
+        parsed_query,
+        "No pude identificar con claridad que cliente, proyecto o tarea queres resumir.",
+    )
+
+
+def _preferred_contextual_summary_scope(user_query: str | None, context: dict) -> str | None:
+    if not user_query or not context or not context.get("_isolated"):
+        return None
+    normalized = user_query.strip().lower()
+    if not any(
+        marker in normalized
+        for marker in (
+            "aca",
+            "acá",
+            "esto",
+            "como estamos",
+            "cómo estamos",
+            "como viene esto",
+            "cómo viene esto",
+            "que es lo mas importante aca",
+            "qué es lo más importante acá",
+        )
+    ):
+        return None
+    return context.get("scope")
+
+
+def _build_contextual_operational_summary(parsed_query: dict, context: dict, scope: str) -> str | None:
+    if scope == "task" and context.get("task"):
+        summary = get_task_operational_summary(context["task"]["id"])
+        if not summary:
+            return None
+        _remember_context_from_summary(parsed_query, summary, "task")
+        advanced_summary = build_task_advanced_summary(summary)
+        _attach_operational_summary_debug(parsed_query, advanced_summary, scope_override="contextual_task")
+        return _format_advanced_task_summary(summary, advanced_summary)
+
+    if scope == "project" and context.get("project"):
+        summary = get_project_operational_summary(context["project"]["id"])
+        advanced_summary = get_project_advanced_summary(context["project"]["id"])
+        if not summary or not advanced_summary:
+            return None
+        _remember_context_from_project_summary(parsed_query, summary)
+        _attach_operational_summary_debug(parsed_query, advanced_summary, scope_override="contextual_project")
+        return _format_advanced_project_summary(summary, advanced_summary)
+
+    if scope == "client" and context.get("client"):
+        projects = get_projects_by_client_id(context["client"]["id"])
+        tasks = get_tasks_by_client_id(context["client"]["id"])
+        advanced_summary = build_client_advanced_summary(context["client"]["name"], projects, tasks)
+        parsed_query["_conversation_context"] = context
+        _attach_operational_summary_debug(parsed_query, advanced_summary, scope_override="contextual_client")
+        return _format_advanced_client_summary(advanced_summary)
+
+    return None
 
 
 def _format_scoped_followup_list(parsed_query: dict, *, scope: str, scope_name: str, tasks: list) -> str:
@@ -1236,6 +1365,16 @@ def _format_task_summary(summary: dict) -> str:
     )
 
 
+def _format_advanced_task_summary(summary: dict, advanced_summary: dict) -> str:
+    lines = [f"Resumen de la tarea {summary['task_id']}:"]
+    lines.append(f"Titulo: {summary['title']}")
+    lines.append(f"Cliente: {summary['client_name']}")
+    lines.append(f"Proyecto: {summary['project_name']}")
+    lines.append(f"Estado general: {advanced_summary['status_overview']}")
+    _append_operational_sections(lines, advanced_summary)
+    return "\n".join(lines)
+
+
 def _format_project_summary(summary: dict) -> str:
     return "\n".join(
         [
@@ -1250,6 +1389,21 @@ def _format_project_summary(summary: dict) -> str:
             f"Hechas: {summary['done_tasks']}",
         ]
     )
+
+
+def _format_advanced_project_summary(summary: dict, advanced_summary: dict) -> str:
+    lines = [f"Resumen del proyecto {summary['project_name']}:"]
+    lines.append(f"Cliente: {summary['client_name']}")
+    lines.append(f"Estado general: {advanced_summary['status_overview']}")
+    _append_operational_sections(lines, advanced_summary)
+    return "\n".join(lines)
+
+
+def _format_advanced_client_summary(advanced_summary: dict) -> str:
+    lines = [f"Resumen del cliente {advanced_summary['entity_name']}:"]
+    lines.append(f"Estado general: {advanced_summary['status_overview']}")
+    _append_operational_sections(lines, advanced_summary)
+    return "\n".join(lines)
 
 
 def _is_next_step_query(user_query: str | None) -> bool:
@@ -1267,9 +1421,93 @@ def _scope_label(scope: str) -> str:
     }.get(scope, scope)
 
 
+def _append_operational_sections(lines: list[str], advanced_summary: dict) -> None:
+    if advanced_summary.get("important_pending"):
+        lines.append("Pendientes importantes:")
+        for item in advanced_summary["important_pending"][:3]:
+            lines.append(_format_operational_item(item))
+
+    if advanced_summary.get("risk_items"):
+        lines.append("Bloqueos o riesgos:")
+        for item in advanced_summary["risk_items"][:3]:
+            lines.append(_format_operational_item(item))
+
+    attention_items = advanced_summary.get("attention_items") or []
+    if attention_items:
+        lines.append("Merece atencion:")
+        for item in attention_items[:3]:
+            lines.append(_format_operational_item(item))
+
+    next_steps = advanced_summary.get("next_steps") or []
+    if next_steps:
+        lines.append("Proximos pasos relevantes:")
+        for item in next_steps[:3]:
+            lines.append(_format_operational_item(item))
+    else:
+        lines.append("Proximos pasos relevantes: no veo un proximo paso explicito en los datos actuales.")
+
+    recommendation = advanced_summary.get("recommendation")
+    if recommendation:
+        lines.append(f"Recomendacion: {recommendation}")
+
+
+def _format_operational_item(item) -> str:
+    if isinstance(item, str):
+        return f"- {item}"
+
+    reason = _operational_reason_label(item)
+    line = f"- {item['title']}"
+    if item.get("project_name") and item.get("project_name") != "Sin proyecto":
+        line += f" | Proyecto: {item['project_name']}"
+    if item.get("client_name") and item.get("client_name") != "Desconocido":
+        line += f" | Cliente: {item['client_name']}"
+    if reason:
+        line += f" | {reason}"
+    if item.get("has_next_action") and item.get("next_action"):
+        line += f" | Proximo paso: {item['next_action']}"
+    elif item.get("missing_next_action"):
+        line += " | Sin proxima accion definida"
+    return line
+
+
+def _operational_reason_label(item: dict) -> str:
+    reasons = []
+    if item.get("is_blocked"):
+        reasons.append("bloqueada")
+    if item.get("is_high_priority"):
+        reasons.append("alta prioridad")
+    if item.get("is_overdue"):
+        reasons.append("vencida")
+    if item.get("is_due_today"):
+        reasons.append("vence hoy")
+    return ", ".join(reasons)
+
+
 def _abort_with_context(parsed_query: dict, message: str) -> str:
     parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
     return message
+
+
+def _attach_operational_summary_debug(parsed_query: dict, advanced_summary: dict, scope_override: str | None = None) -> None:
+    parsed_query["_summary_scope"] = scope_override or advanced_summary.get("scope")
+    parsed_query["_summary_heuristic"] = advanced_summary.get("heuristic", [])
+    parsed_query["_summary_highlights"] = [_debug_summary_item(item) for item in advanced_summary.get("important_pending", [])[:3]]
+    parsed_query["_summary_blockers"] = [_debug_summary_item(item) for item in advanced_summary.get("risk_items", [])[:3]]
+    parsed_query["_summary_next_steps"] = [_debug_summary_item(item) for item in advanced_summary.get("next_steps", [])[:3]]
+    parsed_query["_summary_recommendation"] = advanced_summary.get("recommendation")
+
+
+def _debug_summary_item(item):
+    if isinstance(item, str):
+        return item
+    return {
+        "title": item.get("title"),
+        "client_name": item.get("client_name"),
+        "project_name": item.get("project_name"),
+        "next_action": item.get("next_action"),
+        "status": item.get("status"),
+        "priority": item.get("priority"),
+    }
 
 
 def _remember_context(

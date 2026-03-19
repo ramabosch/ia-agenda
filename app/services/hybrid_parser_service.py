@@ -19,6 +19,10 @@ CLARIFICATION_INTENTS = {
     "clarify_entity_reference",
 }
 
+SUMMARY_INTENTS = {
+    "get_operational_summary",
+}
+
 
 def parse_user_query_hybrid(query: str) -> dict:
     rules_result = parse_user_query_rules(query)
@@ -55,6 +59,8 @@ def _should_prefer_rules(query: str, rules_result: dict, llm_result: dict | None
         if rules_intent in EXECUTIVE_INTENTS:
             return True
         if rules_intent in CLARIFICATION_INTENTS:
+            return True
+        if rules_intent in SUMMARY_INTENTS:
             return True
         if _is_short_or_follow_up(query):
             return True

@@ -1,5 +1,6 @@
 from app.db.session import SessionLocal
 from app.repositories import project_repository
+from app.services.task_service import build_operational_focus_from_tasks
 
 
 def create_project(client_id: int, name: str, description: str | None = None):
@@ -207,3 +208,47 @@ def get_followup_project_snapshot() -> dict:
             "despues mayor acumulacion abierta sin next_action",
         ],
     }
+
+
+def get_project_advanced_summary(project_id: int):
+    db = SessionLocal()
+    try:
+        project = project_repository.get_project_with_tasks(db, project_id)
+        if not project:
+            return None
+
+        base_summary = get_project_operational_summary(project_id)
+        focus = build_operational_focus_from_tasks(project.tasks)
+
+        return {
+            "scope": "project",
+            "project_id": project.id,
+            "entity_name": project.name,
+            "client_id": project.client.id if project.client else None,
+            "client_name": project.client.name if project.client else "Desconocido",
+            "status_overview": _build_project_status_overview(base_summary),
+            "important_pending": focus["important_pending"],
+            "risk_items": focus["risk_items"],
+            "attention_items": focus["attention_items"],
+            "next_steps": focus["next_steps"],
+            "recommendation": focus["recommendation"],
+            "heuristic": focus["heuristic"],
+        }
+    finally:
+        db.close()
+
+
+def _build_project_status_overview(summary: dict) -> str:
+    open_tasks = summary["open_tasks"]
+    blocked_tasks = summary["blocked_tasks"]
+    in_progress = summary["in_progress_tasks"]
+
+    if open_tasks == 0:
+        return "No veo tareas abiertas en este proyecto."
+
+    parts = [f"Hay {open_tasks} tareas abiertas en este proyecto."]
+    if blocked_tasks:
+        parts.append(f"{blocked_tasks} estan bloqueadas.")
+    if in_progress:
+        parts.append(f"{in_progress} siguen en progreso.")
+    return " ".join(parts)
