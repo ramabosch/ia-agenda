@@ -37,12 +37,98 @@ def parse_user_query(query: str) -> dict:
     normalized = query.strip().lower()
 
     result = (
-        _parse_read_intents(normalized)
+        _parse_creation_intents(normalized)
+        or _parse_read_intents(normalized)
         or _parse_ambiguity_intents(normalized)
         or _parse_task_update_intents(normalized)
         or _parse_today_intents(normalized)
     )
     return result or {"intent": "unknown"}
+
+
+def _parse_creation_intents(normalized: str) -> dict | None:
+    create_task_prefix = r"(?:cre(?:a|á)\s+una|cre(?:a|á)|agreg(?:a|á)\s+una|agreg(?:a|á)|sum(?:a|á)\s+una|sum(?:a|á))"
+    create_followup_prefix = r"(?:cre(?:a|á)\s+un|cre(?:a|á)|agreg(?:a|á)\s+un|agreg(?:a|á)|sum(?:a|á)\s+un|sum(?:a|á))"
+    priority = "alta" if any(token in normalized for token in ["alta prioridad", "prioridad alta"]) else None
+
+    match = re.search(rf"^{create_task_prefix}\s+tarea\s+a\s+(.+?)\s+para\s+(.+)$", normalized)
+    if match:
+        return {
+            "intent": "create_task",
+            "client_name": match.group(1).strip(),
+            "task_name": match.group(2).strip(),
+            "new_priority": priority,
+        }
+
+    match = re.search(rf"^{create_task_prefix}\s+tarea\s+en\s+(.+?)(?:\s+para\s+(.+)|\s*:\s*(.+))?$", normalized)
+    if match:
+        task_title = (match.group(2) or match.group(3) or "").strip() or None
+        target = match.group(1).strip()
+        payload = {
+            "intent": "create_task",
+            "task_name": task_title,
+            "new_priority": priority,
+        }
+        if "proyecto" in target:
+            payload["project_name"] = target
+        else:
+            payload["entity_hint"] = target
+        return payload
+
+    match = re.search(rf"^{create_task_prefix}\s+tarea(?:\s+(?:de\s+)?)?(?:alta prioridad|prioridad alta)?\s+para\s+(.+)$", normalized)
+    if match:
+        return {
+            "intent": "create_task",
+            "task_name": match.group(1).strip(),
+            "new_priority": priority,
+        }
+
+    if any(phrase in normalized for phrase in ["converti esto en tarea", "convertí esto en tarea", "convierte esto en tarea"]):
+        return {"intent": "create_task", "task_name": "esto"}
+
+    match = re.search(rf"^{create_followup_prefix}\s+follow-?up(?:\s+para\s+(.+))?$", normalized)
+    if match:
+        return {
+            "intent": "create_followup",
+            "task_name": match.group(1).strip() if match and match.group(1) else None,
+            "new_priority": priority,
+        }
+
+    match = re.search(r"(?:sum(?:a|á)|agreg(?:a|á)|dej(?:a|á))\s+una?\s*nota\s+al\s+proyecto(?:\s+(.+?))?\s*:\s*(.+)$", normalized)
+    if match:
+        project_name = (match.group(1) or "este proyecto").strip()
+        return {
+            "intent": "add_project_note",
+            "project_name": project_name,
+            "last_note": match.group(2).strip(),
+        }
+
+    match = re.search(r"^(?:sum(?:a|á)|agreg(?:a|á)|dej(?:a|á))\s+una?\s*nota\s+al\s+proyecto(?:\s+(.+))?$", normalized)
+    if match:
+        project_name = (match.group(1) or "este proyecto").strip()
+        return {
+            "intent": "add_project_note",
+            "project_name": project_name,
+            "last_note": None,
+        }
+
+    match = re.search(r"^dej(?:a|á)\s+nota\s*:\s*(.+)$", normalized)
+    if match:
+        return {
+            "intent": "add_task_note",
+            "task_name": "esta tarea",
+            "last_note": match.group(1).strip(),
+        }
+
+    match = re.search(r"^(?:dejame|dejame|dej(?:a|á))\s+una?\s+proxima\s+accion\s+para\s+(.+)$", normalized)
+    if match:
+        return {
+            "intent": "update_task_next_action",
+            "task_name": "esta tarea",
+            "next_action": match.group(1).strip(),
+        }
+
+    return None
 
 
 def _parse_ambiguity_intents(normalized: str) -> dict | None:

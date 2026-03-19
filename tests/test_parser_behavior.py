@@ -111,6 +111,31 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(important["filter_mode"], "important")
         self.assertEqual(client["intent"], "get_client_facing_summary")
 
+    def test_parse_creation_queries(self):
+        create_task = parse_user_query("crea una tarea para revisar indicadores")
+        create_for_client = parse_user_query("agrega una tarea a Cam para definir metricas")
+        create_in_project = parse_user_query("agrega una tarea en este proyecto")
+        project_note = parse_user_query("suma una nota al proyecto: falta validacion")
+        project_note_without_content = parse_user_query("suma una nota al proyecto")
+        next_action = parse_user_query("dejame una proxima accion para manana")
+        convert = parse_user_query("converti esto en tarea")
+
+        self.assertEqual(create_task["intent"], "create_task")
+        self.assertEqual(create_task["task_name"], "revisar indicadores")
+        self.assertEqual(create_for_client["intent"], "create_task")
+        self.assertEqual(create_for_client["client_name"], "cam")
+        self.assertEqual(create_for_client["task_name"], "definir metricas")
+        self.assertEqual(create_in_project["intent"], "create_task")
+        self.assertEqual(create_in_project["project_name"], "este proyecto")
+        self.assertEqual(project_note["intent"], "add_project_note")
+        self.assertEqual(project_note["last_note"], "falta validacion")
+        self.assertEqual(project_note_without_content["intent"], "add_project_note")
+        self.assertIsNone(project_note_without_content["last_note"])
+        self.assertEqual(next_action["intent"], "update_task_next_action")
+        self.assertEqual(next_action["next_action"], "manana")
+        self.assertEqual(convert["intent"], "create_task")
+        self.assertEqual(convert["task_name"], "esto")
+
     def test_parse_contextual_followups(self):
         projects = parse_user_query("y sus proyectos?")
         close_task = parse_user_query("cerrala")

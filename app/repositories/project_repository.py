@@ -38,6 +38,17 @@ def get_all_projects_with_tasks(db: Session) -> list[Project]:
 def get_project_by_id(db: Session, project_id: int) -> Project | None:
     return db.query(Project).filter(Project.id == project_id).first()
 
+
+def update_project_description(db: Session, project_id: int, description: str | None) -> Project | None:
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        return None
+
+    project.description = description
+    db.commit()
+    db.refresh(project)
+    return project
+
 def get_project_with_tasks(db: Session, project_id: int) -> Project | None:
     return (
         db.query(Project)

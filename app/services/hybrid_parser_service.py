@@ -112,6 +112,9 @@ def _is_short_or_follow_up(query: str) -> bool:
 
 def _is_update_intent(intent: str) -> bool:
     return intent in {
+        "create_task",
+        "create_followup",
+        "add_project_note",
         "update_task_status",
         "update_task_priority",
         "add_task_note",

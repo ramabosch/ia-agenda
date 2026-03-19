@@ -41,6 +41,9 @@ ALLOWED_INTENTS = {
     "get_followup_needed_summary",
     "get_push_today_summary",
     "clarify_entity_reference",
+    "create_task",
+    "create_followup",
+    "add_project_note",
     "update_task_status",
     "add_task_update",
     "add_task_note",
@@ -556,6 +559,9 @@ Intentos permitidos:
 - get_followup_needed_summary
 - get_push_today_summary
 - clarify_entity_reference
+- create_task
+- create_followup
+- add_project_note
 - update_task_status
 - add_task_update
 - add_task_note
@@ -733,6 +739,16 @@ def _coerce_semantics(payload: dict[str, Any], user_query: str) -> dict[str, Any
             payload["entity_hint"] = task_name or project_name or client_name
         if not any([payload.get("entity_hint"), client_name, project_name, task_name, task_id, project_id]):
             payload["intent"] = "unknown"
+
+    if intent in {"create_task", "create_followup"}:
+        if not task_name and not payload.get("entity_hint"):
+            payload["intent"] = "unknown"
+
+    if intent == "add_project_note":
+        if not payload.get("last_note"):
+            payload["intent"] = "unknown"
+        if not project_name and not payload.get("entity_hint"):
+            payload["project_name"] = "este proyecto"
 
     if intent == "get_task_summary":
         if not task_id and not task_name:

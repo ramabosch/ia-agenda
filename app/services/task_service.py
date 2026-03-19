@@ -38,6 +38,43 @@ def get_all_tasks():
         db.close()
 
 
+def create_task_conversational(
+    project_id: int,
+    title: str,
+    *,
+    priority: str = "media",
+    description: str | None = None,
+    due_date: date | None = None,
+    last_note: str | None = None,
+    next_action: str | None = None,
+):
+    db = SessionLocal()
+    try:
+        task = task_repository.create_task(
+            db,
+            project_id,
+            title.strip(),
+            description,
+            priority,
+            due_date,
+            last_note,
+            next_action,
+        )
+        return {
+            "created": True,
+            "task_id": task.id,
+            "task_title": task.title,
+            "project_id": task.project_id,
+            "field": "task",
+            "priority": task.priority,
+            "next_action": task.next_action,
+            "last_note": task.last_note,
+            "task": task,
+        }
+    finally:
+        db.close()
+
+
 def get_all_tasks_with_relations():
     db = SessionLocal()
     try:

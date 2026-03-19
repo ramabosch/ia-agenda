@@ -4,6 +4,8 @@ from app.services.conversation_service import (
     get_last_conversation,
 )
 from app.services.project_service import (
+    add_project_note_conversational,
+    get_all_projects,
     get_executive_project_snapshot,
     get_followup_project_snapshot,
     get_operational_friction_project_snapshot,
@@ -16,6 +18,7 @@ from app.services.reference_resolver import resolve_references
 from app.services.task_service import (
     add_task_note_conversational,
     build_client_advanced_summary,
+    create_task_conversational,
     build_friction_focus_from_tasks,
     build_recommendation_focus_from_tasks,
     build_task_friction_summary,
@@ -42,6 +45,9 @@ REFERENCE_AWARE_INTENTS = {
     "get_operational_summary",
     "get_operational_friction_summary",
     "get_operational_recommendation",
+    "create_task",
+    "create_followup",
+    "add_project_note",
     "get_open_tasks_by_client_name",
     "get_projects_by_client_name",
     "get_tasks_by_client_name",
@@ -70,6 +76,12 @@ TASK_UPDATE_INTENTS = {
     "update_task_last_note",
     "complete_task_by_name",
     "update_task_priority_by_name",
+}
+
+CREATION_INTENTS = {
+    "create_task",
+    "create_followup",
+    "add_project_note",
 }
 
 EXECUTIVE_INTENTS = {
@@ -144,6 +156,13 @@ def build_response_from_query(
         return _handle_conversational_continuity_intent(
             parsed_query,
             user_query=user_query,
+            conversation_context=conversation_context,
+        )
+
+    if intent in CREATION_INTENTS:
+        return _handle_creation_intent(
+            parsed_query,
+            resolved_references,
             conversation_context=conversation_context,
         )
 
@@ -540,6 +559,203 @@ def _finalize_update_response(parsed_query: dict, resolved_references: dict, upd
         return f"Listo. La tarea '{result['task_title']}' sigue en estado '{new_value}', y ademas registre la nota '{result['reason']}'."
 
     return f"Listo. Actualice la tarea '{result['task_title']}'. Cambio {field_labels.get(result['field'], result['field'])}: '{old_value}' -> '{new_value}'."
+
+
+def _handle_creation_intent(
+    parsed_query: dict,
+    resolved_references: dict,
+    *,
+    conversation_context: dict | None,
+) -> str:
+    parsed_query["_creation_intent"] = parsed_query.get("intent")
+    parsed_query["_creation_real"] = False
+    parsed_query["_creation_aborted"] = False
+    parsed_query["_creation_target_scope"] = "none"
+    parsed_query["_creation_fields"] = {
+        "task_name": parsed_query.get("task_name"),
+        "project_name": parsed_query.get("project_name"),
+        "client_name": parsed_query.get("client_name"),
+        "last_note": parsed_query.get("last_note"),
+        "next_action": parsed_query.get("next_action"),
+        "new_priority": parsed_query.get("new_priority"),
+    }
+
+    if resolved_references.get("clarification_needed"):
+        parsed_query["_creation_aborted"] = True
+        parsed_query["_creation_result"] = {"error": "clarification_needed"}
+        return _abort_with_context(parsed_query, _build_clarification_response(resolved_references))
+
+    intent = parsed_query.get("intent")
+    if intent == "add_project_note":
+        return _handle_project_note_creation(
+            parsed_query,
+            resolved_references,
+            conversation_context=conversation_context,
+        )
+    return _handle_task_creation(parsed_query, resolved_references, conversation_context=conversation_context)
+
+
+def _handle_project_note_creation(
+    parsed_query: dict,
+    resolved_references: dict,
+    *,
+    conversation_context: dict | None,
+) -> str:
+    note_content = (parsed_query.get("last_note") or "").strip()
+    if not note_content:
+        parsed_query["_creation_aborted"] = True
+        parsed_query["_creation_result"] = {"error": "missing_note"}
+        return _abort_with_context(parsed_query, "Necesito el contenido de la nota para agregarla al proyecto.")
+
+    project = _resolve_creation_project_target(
+        parsed_query,
+        resolved_references,
+        conversation_context=conversation_context,
+    )
+    if isinstance(project, str):
+        parsed_query["_creation_aborted"] = True
+        parsed_query["_creation_result"] = {"error": "project_resolution_failed"}
+        return _abort_with_context(parsed_query, project)
+
+    result = add_project_note_conversational(project["id"], note_content)
+    parsed_query["_creation_target_scope"] = "project"
+    parsed_query["_creation_result"] = result
+    parsed_query["_creation_real"] = bool(result.get("updated"))
+    if not result.get("updated"):
+        parsed_query["_creation_aborted"] = True
+        return _abort_with_context(parsed_query, "No pude registrar la nota en ese proyecto.")
+
+    parsed_query["_update_type"] = "project_note"
+    parsed_query["_update_real"] = True
+    parsed_query["_update_result"] = result
+    parsed_query["_conversation_context"] = {
+        **_base_conversation_context(parsed_query, "project"),
+        "project": {"id": project["id"], "name": project["name"]},
+    }
+    return f"Listo. Agregue una nota al proyecto '{project['name']}'. Contenido: '{note_content}'."
+
+
+def _handle_task_creation(
+    parsed_query: dict,
+    resolved_references: dict,
+    *,
+    conversation_context: dict | None,
+) -> str:
+    title = _resolve_created_task_title(parsed_query, conversation_context)
+    if not title:
+        parsed_query["_creation_aborted"] = True
+        parsed_query["_creation_result"] = {"error": "missing_title"}
+        return _abort_with_context(parsed_query, "Necesito el nombre o contenido de la tarea para crearla con seguridad.")
+
+    project = _resolve_creation_project_target(
+        parsed_query,
+        resolved_references,
+        conversation_context=conversation_context,
+    )
+    if isinstance(project, str):
+        parsed_query["_creation_aborted"] = True
+        parsed_query["_creation_result"] = {"error": "project_resolution_failed"}
+        return _abort_with_context(parsed_query, project)
+
+    priority = parsed_query.get("new_priority") or "media"
+    next_action = (parsed_query.get("next_action") or "").strip() or None
+    note_content = (parsed_query.get("last_note") or "").strip() or None
+    result = create_task_conversational(
+        project["id"],
+        title,
+        priority=priority,
+        next_action=next_action,
+        last_note=note_content,
+    )
+
+    parsed_query["_creation_target_scope"] = "project"
+    parsed_query["_creation_result"] = result
+    parsed_query["_creation_real"] = bool(result.get("created"))
+    if not result.get("created"):
+        parsed_query["_creation_aborted"] = True
+        return _abort_with_context(parsed_query, "No pude crear la tarea en ese proyecto.")
+
+    parsed_query["_update_type"] = "task_creation"
+    parsed_query["_update_real"] = True
+    parsed_query["_update_result"] = result
+    parsed_query["_conversation_context"] = {
+        **_base_conversation_context(parsed_query, "task"),
+        "project": {"id": project["id"], "name": project["name"]},
+        "task": {"id": result["task_id"], "name": result["task_title"]},
+    }
+
+    parts = [
+        f"Listo. Cree una tarea nueva: '{result['task_title']}'.",
+        f"Proyecto: {project['name']}.",
+        f"Prioridad: {result['priority']}.",
+    ]
+    if next_action:
+        parts.append(f"Proxima accion inicial: {next_action}.")
+    if note_content:
+        parts.append(f"Nota inicial: {note_content}.")
+    return " ".join(parts)
+
+
+def _resolve_created_task_title(parsed_query: dict, conversation_context: dict | None) -> str | None:
+    raw_title = (parsed_query.get("task_name") or "").strip()
+    if raw_title and raw_title not in {"esto", "esta tarea", "esa tarea"}:
+        return raw_title
+
+    context = conversation_context or {}
+    if raw_title == "esto":
+        snapshot = context.get("response_snapshot") if isinstance(context, dict) else None
+        if isinstance(snapshot, dict):
+            items = _snapshot_items(snapshot)
+            if items:
+                return items[0].get("title") or items[0].get("name")
+        if context.get("task", {}).get("name"):
+            return context["task"]["name"]
+
+    if raw_title in {"esta tarea", "esa tarea"} and context.get("task", {}).get("name"):
+        return context["task"]["name"]
+
+    return None
+
+
+def _resolve_creation_project_target(
+    parsed_query: dict,
+    resolved_references: dict,
+    *,
+    conversation_context: dict | None,
+) -> dict | str:
+    project = resolved_references.get("project", {}).get("resolved")
+    if project:
+        return project
+
+    if resolved_references.get("project", {}).get("ambiguous"):
+        return _build_clarification_response(
+            resolved_references,
+            prefix="Encontre varios proyectos posibles para crear eso.",
+        )
+
+    client = resolved_references.get("client", {}).get("resolved")
+    if client:
+        projects = get_projects_by_client_id(client["id"])
+        if len(projects) == 1:
+            return {"id": projects[0].id, "name": projects[0].name}
+        if len(projects) > 1:
+            names = ", ".join(project.name for project in projects[:3])
+            return f"El cliente '{client['name']}' tiene varios proyectos. Decime en cual queres crearlo. Opciones: {names}."
+
+    explicit_project_name = parsed_query.get("project_name")
+    if explicit_project_name in {"este proyecto", "ese proyecto"}:
+        context = conversation_context or {}
+        if isinstance(context, dict) and context.get("_isolated"):
+            current_project = context.get("project") or {}
+            if current_project.get("id") and current_project.get("name"):
+                return {"id": current_project["id"], "name": current_project["name"]}
+        return "No tengo un proyecto actual suficientemente claro para crear trabajo ahi."
+
+    projects = get_all_projects()
+    if len(projects) == 1:
+        return {"id": projects[0].id, "name": projects[0].name}
+
+    return "No tengo un proyecto claro para crear eso. Decime el proyecto o hacelo desde una conversacion ya enfocada en ese proyecto."
 
 
 def _handle_followup_intent(
@@ -1792,8 +2008,20 @@ def _resolve_if_needed(parsed_query: dict, user_query: str | None, conversation_
         parsed_query["_security_reason"] = None
         return resolved
 
+    resolver_payload = parsed_query
+    if intent in {"create_task", "create_followup"}:
+        resolver_payload = dict(parsed_query)
+        resolver_payload.pop("task_name", None)
+        if not any([resolver_payload.get("project_name"), resolver_payload.get("client_name"), resolver_payload.get("entity_hint")]):
+            context = conversation_context or {}
+            if isinstance(context, dict) and context.get("_isolated"):
+                if context.get("project", {}).get("name"):
+                    resolver_payload["project_name"] = context["project"]["name"]
+                elif context.get("client", {}).get("name"):
+                    resolver_payload["client_name"] = context["client"]["name"]
+
     resolved = resolve_references(
-        parsed_query,
+        resolver_payload,
         user_query=user_query,
         conversation_context=conversation_context,
         allow_global_context=False,
