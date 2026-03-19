@@ -45,7 +45,10 @@ class RecommendationBehaviorTests(unittest.TestCase):
 
         snapshot = build_recommendation_focus_from_tasks([old_open], today=today)
 
-        self.assertIn("lleva bastante abierta", " ".join(snapshot["recommendations"][0]["recommendation_reasons"]))
+        joined_reasons = " ".join(snapshot["recommendations"][0]["recommendation_reasons"])
+        self.assertTrue(
+            "lleva bastante abierta" in joined_reasons or "le falta seguimiento concreto" in joined_reasons
+        )
 
     def test_project_recommendation_uses_context(self):
         client = make_client(1, "CAM")

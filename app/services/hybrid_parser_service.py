@@ -20,6 +20,9 @@ EXECUTIVE_INTENTS = {
     "get_missing_next_actions_summary",
     "get_followup_needed_summary",
     "get_push_today_summary",
+    "get_due_tasks_summary",
+    "get_overdue_tasks_summary",
+    "get_missing_due_date_summary",
 }
 
 CLARIFICATION_INTENTS = {

@@ -30,7 +30,14 @@ class CreationBehaviorTests(unittest.TestCase):
         ) as create_mock:
             response = build_response_from_query(parsed, user_query="agrega una tarea a Cam para definir metricas", conversation_context={})
 
-        create_mock.assert_called_once_with(project.id, "definir metricas", priority="media", next_action=None, last_note=None)
+        create_mock.assert_called_once_with(
+            project.id,
+            "definir metricas",
+            priority="media",
+            due_date=None,
+            next_action=None,
+            last_note=None,
+        )
         self.assertIn("cree una tarea nueva", response.lower())
         self.assertIn("dashboard", response.lower())
         self.assertTrue(parsed.get("_creation_real"))
@@ -84,7 +91,14 @@ class CreationBehaviorTests(unittest.TestCase):
         ) as create_mock:
             response = build_response_from_query(parsed, user_query="crea una tarea alta prioridad para revisar indicadores", conversation_context={})
 
-        create_mock.assert_called_once_with(project.id, "revisar indicadores", priority="alta", next_action=None, last_note=None)
+        create_mock.assert_called_once_with(
+            project.id,
+            "revisar indicadores",
+            priority="alta",
+            due_date=None,
+            next_action=None,
+            last_note=None,
+        )
         self.assertIn("prioridad: alta", response.lower())
 
     def test_add_project_note(self):
@@ -241,7 +255,14 @@ class CreationBehaviorTests(unittest.TestCase):
         ) as create_mock:
             response = build_response_from_query(parsed, user_query="converti esto en tarea", conversation_context=context)
 
-        create_mock.assert_called_once_with(project.id, "Resolver bloqueo API", priority="media", next_action=None, last_note=None)
+        create_mock.assert_called_once_with(
+            project.id,
+            "Resolver bloqueo API",
+            priority="media",
+            due_date=None,
+            next_action=None,
+            last_note=None,
+        )
         self.assertIn("resolver bloqueo api", response.lower())
 
 

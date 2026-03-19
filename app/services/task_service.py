@@ -1,8 +1,21 @@
-from datetime import date
+from datetime import date, timedelta
 
 from app.db.session import SessionLocal
 from app.repositories import task_repository, task_update_repository
 from app.schemas.enums import TaskPriority
+
+
+WEEKDAY_INDEX = {
+    "lunes": 0,
+    "martes": 1,
+    "miercoles": 2,
+    "miércoles": 2,
+    "jueves": 3,
+    "viernes": 4,
+    "sabado": 5,
+    "sábado": 5,
+    "domingo": 6,
+}
 
 
 def create_task(
@@ -113,6 +126,78 @@ def get_tasks_due_today(today: date):
         return task_repository.get_tasks_due_today(db, today)
     finally:
         db.close()
+
+
+def resolve_due_hint(due_hint: str | None, *, today: date | None = None) -> dict:
+    today = today or date.today()
+    normalized = _normalize_temporal_text(due_hint)
+    if not normalized:
+        return {
+            "resolved": False,
+            "time_scope": None,
+            "due_hint": due_hint,
+            "due_date": None,
+            "label": None,
+            "degraded": False,
+            "reason": "missing_due_hint",
+        }
+
+    if normalized == "hoy":
+        return {
+            "resolved": True,
+            "time_scope": "today",
+            "due_hint": due_hint,
+            "due_date": today,
+            "label": "hoy",
+            "degraded": False,
+            "reason": None,
+        }
+
+    if normalized == "manana":
+        return {
+            "resolved": True,
+            "time_scope": "tomorrow",
+            "due_hint": due_hint,
+            "due_date": today + timedelta(days=1),
+            "label": "mañana",
+            "degraded": False,
+            "reason": None,
+        }
+
+    if normalized in WEEKDAY_INDEX:
+        target_weekday = WEEKDAY_INDEX[normalized]
+        days_ahead = (target_weekday - today.weekday()) % 7
+        due_date = today + timedelta(days=days_ahead)
+        return {
+            "resolved": True,
+            "time_scope": "weekday",
+            "due_hint": due_hint,
+            "due_date": due_date,
+            "label": normalized,
+            "degraded": False,
+            "reason": None,
+        }
+
+    if normalized == "esta semana":
+        return {
+            "resolved": False,
+            "time_scope": "this_week",
+            "due_hint": due_hint,
+            "due_date": None,
+            "label": "esta semana",
+            "degraded": True,
+            "reason": "range_requires_concrete_day",
+        }
+
+    return {
+        "resolved": False,
+        "time_scope": "ambiguous",
+        "due_hint": due_hint,
+        "due_date": None,
+        "label": due_hint,
+        "degraded": True,
+        "reason": "unsupported_due_hint",
+    }
 
 
 def update_task_status(task_id: int, new_status: str):
@@ -494,6 +579,80 @@ def get_followup_task_snapshot(today: date | None = None) -> dict:
     }
 
 
+def get_temporal_task_snapshot(
+    time_scope: str,
+    *,
+    today: date | None = None,
+    temporal_focus: str | None = None,
+) -> dict:
+    today = today or date.today()
+    tasks = get_all_tasks_with_relations()
+    return build_temporal_task_snapshot_from_tasks(
+        tasks,
+        time_scope=time_scope,
+        today=today,
+        temporal_focus=temporal_focus,
+    )
+
+
+def build_temporal_task_snapshot_from_tasks(
+    tasks: list,
+    *,
+    time_scope: str,
+    today: date | None = None,
+    temporal_focus: str | None = None,
+) -> dict:
+    today = today or date.today()
+    items = [_serialize_task_for_executive(task, today) for task in tasks]
+    open_items = [item for item in items if item["status"] != "hecha"]
+
+    matched_items = [item for item in open_items if _matches_temporal_scope(item, time_scope=time_scope, today=today)]
+    if temporal_focus == "followups":
+        matched_items = [item for item in matched_items if _is_followup_like(item)]
+    elif temporal_focus == "closing":
+        matched_items = [item for item in matched_items if not item["is_blocked"]]
+
+    matched_items = sorted(matched_items, key=_temporal_rank_key)
+
+    return {
+        "today": today.isoformat(),
+        "time_scope": time_scope,
+        "temporal_focus": temporal_focus,
+        "tasks": items,
+        "open_tasks": open_items,
+        "matched_items": matched_items[:10],
+        "heuristic": _build_temporal_heuristic(time_scope, temporal_focus),
+        "degraded": False,
+    }
+
+
+def get_missing_due_date_snapshot(today: date | None = None) -> dict:
+    today = today or date.today()
+    tasks = get_all_tasks_with_relations()
+    return build_missing_due_date_snapshot_from_tasks(tasks, today=today)
+
+
+def build_missing_due_date_snapshot_from_tasks(tasks: list, *, today: date | None = None) -> dict:
+    today = today or date.today()
+    items = [_serialize_task_for_executive(task, today) for task in tasks]
+    open_items = [item for item in items if item["status"] != "hecha"]
+    missing_due_items = [item for item in open_items if _should_have_due_date(item)]
+    missing_due_items = sorted(missing_due_items, key=_missing_due_rank_key)
+
+    return {
+        "today": today.isoformat(),
+        "tasks": items,
+        "open_tasks": open_items,
+        "missing_due_items": missing_due_items[:10],
+        "heuristic": [
+            "solo tareas abiertas sin fecha",
+            "prioriza bloqueadas, alta prioridad o con proxima accion",
+            "si no hay senales operativas, no exige fecha",
+        ],
+        "degraded": False,
+    }
+
+
 def build_operational_focus_from_tasks(tasks: list, today: date | None = None) -> dict:
     today = today or date.today()
     items = [_serialize_task_for_executive(task, today) for task in tasks]
@@ -823,6 +982,7 @@ def _serialize_task_for_executive(task, today: date) -> dict:
         "status": status,
         "priority": priority,
         "due_date": str(due_date) if due_date else None,
+        "due_date_value": due_date,
         "last_note": task.last_note,
         "next_action": next_action,
         "project_id": project.id if project else None,
@@ -881,6 +1041,89 @@ def _task_priority_score(
     if is_in_progress:
         score += 20
     return score
+
+
+def _matches_temporal_scope(item: dict, *, time_scope: str, today: date) -> bool:
+    due_value = item.get("due_date_value")
+    if item.get("status") == "hecha":
+        return False
+    if time_scope == "today":
+        return bool(due_value and due_value == today)
+    if time_scope == "tomorrow":
+        return bool(due_value and due_value == today + timedelta(days=1))
+    if time_scope == "this_week":
+        week_end = today + timedelta(days=(6 - today.weekday()))
+        return bool(due_value and today <= due_value <= week_end)
+    if time_scope == "overdue":
+        return bool(due_value and due_value < today)
+    if time_scope == "due_items":
+        return bool(due_value)
+    return False
+
+
+def _is_followup_like(item: dict) -> bool:
+    title = (item.get("title") or "").strip().lower()
+    return bool(item.get("has_next_action") or title.startswith("follow-up") or title.startswith("follow up"))
+
+
+def _should_have_due_date(item: dict) -> bool:
+    return bool(
+        item.get("status") != "hecha"
+        and not item.get("due_date_value")
+        and (
+            item.get("is_blocked")
+            or item.get("is_high_priority")
+            or item.get("has_next_action")
+            or item.get("needs_followup")
+            or item.get("is_in_progress")
+        )
+    )
+
+
+def _build_temporal_heuristic(time_scope: str, temporal_focus: str | None) -> list[str]:
+    scope_label = {
+        "today": "vence hoy",
+        "tomorrow": "vence mañana",
+        "this_week": "vence esta semana",
+        "overdue": "esta vencido",
+        "due_items": "tiene fecha cargada",
+    }.get(time_scope, "tiene senal temporal")
+    heuristics = [
+        f"solo tareas abiertas que {scope_label}",
+        "prioriza bloqueadas, vencidas y alta prioridad",
+    ]
+    if temporal_focus == "followups":
+        heuristics.append("acota a tareas tipo follow-up o con proxima accion")
+    if temporal_focus == "closing":
+        heuristics.append("prioriza lo que podria empujarse para cierre")
+    return heuristics
+
+
+def _temporal_rank_key(item: dict) -> tuple:
+    due_sort = item["due_date"] or "9999-12-31"
+    return (
+        -int(item["is_overdue"]),
+        -int(item["is_due_today"]),
+        -int(item["is_blocked"]),
+        -int(item["is_high_priority"]),
+        due_sort,
+        item["client_name"],
+        item["project_name"],
+        item["title"],
+    )
+
+
+def _missing_due_rank_key(item: dict) -> tuple:
+    return (
+        -int(item["is_blocked"]),
+        -int(item["is_high_priority"]),
+        -int(item["has_next_action"]),
+        -int(item["needs_followup"]),
+        -int(item["is_in_progress"]),
+        item["client_name"],
+        item["project_name"],
+        item["title"],
+    )
 
 
 def _task_rank_key(item: dict) -> tuple:
@@ -1091,6 +1334,23 @@ def _build_friction_signals(
 def _days_since(value, today: date) -> int | None:
     if value is None:
         return None
+
+
+def _normalize_temporal_text(value: str | None) -> str:
+    if not value:
+        return ""
+    normalized = value.strip().lower()
+    replacements = {
+        "á": "a",
+        "é": "e",
+        "í": "i",
+        "ó": "o",
+        "ú": "u",
+    }
+    for source, target in replacements.items():
+        normalized = normalized.replace(source, target)
+    normalized = normalized.replace("el ", "").strip()
+    return normalized
     if isinstance(value, date) and not hasattr(value, "hour"):
         return (today - value).days
     try:

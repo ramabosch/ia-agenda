@@ -1,3 +1,5 @@
+from datetime import date
+
 from app.services.client_service import get_active_clients
 from app.services.conversation_service import (
     get_conversations_for_today,
@@ -17,6 +19,8 @@ from app.services.project_service import (
 from app.services.reference_resolver import resolve_references
 from app.services.task_service import (
     add_task_note_conversational,
+    build_missing_due_date_snapshot_from_tasks,
+    build_temporal_task_snapshot_from_tasks,
     build_client_advanced_summary,
     create_task_conversational,
     build_friction_focus_from_tasks,
@@ -26,13 +30,16 @@ from app.services.task_service import (
     build_task_advanced_summary,
     get_executive_task_snapshot,
     get_followup_task_snapshot,
+    get_missing_due_date_snapshot,
     get_open_tasks_by_client_id,
     get_operational_friction_snapshot,
     get_operational_recommendation_snapshot,
+    get_temporal_task_snapshot,
     get_task_operational_summary,
     get_tasks_by_client_id,
     get_tasks_by_project_id,
     get_tasks_by_status,
+    resolve_due_hint,
     update_task_next_action_conversational,
     update_task_priority_conversational,
     update_task_status_conversational,
@@ -98,6 +105,12 @@ FOLLOWUP_INTENTS = {
     "get_missing_next_actions_summary",
     "get_followup_needed_summary",
     "get_push_today_summary",
+}
+
+TEMPORAL_INTENTS = {
+    "get_due_tasks_summary",
+    "get_overdue_tasks_summary",
+    "get_missing_due_date_summary",
 }
 
 FRICTION_INTENTS = {
@@ -182,6 +195,14 @@ def build_response_from_query(
 
     if intent in FOLLOWUP_INTENTS:
         return _handle_followup_intent(parsed_query, resolved_references, user_query, conversation_context)
+
+    if intent in TEMPORAL_INTENTS:
+        return _handle_temporal_intent(
+            parsed_query,
+            resolved_references,
+            user_query=user_query,
+            conversation_context=conversation_context,
+        )
 
     if intent == "get_client_summary":
         client_message = _require_resolved_entity(resolved_references, "client", "cliente", action_text="resumir")
@@ -578,6 +599,8 @@ def _handle_creation_intent(
         "last_note": parsed_query.get("last_note"),
         "next_action": parsed_query.get("next_action"),
         "new_priority": parsed_query.get("new_priority"),
+        "due_hint": parsed_query.get("due_hint"),
+        "time_scope": parsed_query.get("time_scope"),
     }
 
     if resolved_references.get("clarification_needed"):
@@ -660,10 +683,19 @@ def _handle_task_creation(
     priority = parsed_query.get("new_priority") or "media"
     next_action = (parsed_query.get("next_action") or "").strip() or None
     note_content = (parsed_query.get("last_note") or "").strip() or None
+    temporal_resolution = _resolve_creation_temporal_fields(parsed_query)
+    if temporal_resolution.get("error_message"):
+        parsed_query["_creation_aborted"] = True
+        parsed_query["_creation_result"] = {
+            "error": "temporal_resolution_failed",
+            "temporal_resolution": temporal_resolution,
+        }
+        return _abort_with_context(parsed_query, temporal_resolution["error_message"])
     result = create_task_conversational(
         project["id"],
         title,
         priority=priority,
+        due_date=temporal_resolution.get("due_date"),
         next_action=next_action,
         last_note=note_content,
     )
@@ -691,6 +723,8 @@ def _handle_task_creation(
     ]
     if next_action:
         parts.append(f"Proxima accion inicial: {next_action}.")
+    if temporal_resolution.get("due_date"):
+        parts.append(f"Vence: {temporal_resolution['due_date'].isoformat()}.")
     if note_content:
         parts.append(f"Nota inicial: {note_content}.")
     return " ".join(parts)
@@ -700,6 +734,9 @@ def _resolve_created_task_title(parsed_query: dict, conversation_context: dict |
     raw_title = (parsed_query.get("task_name") or "").strip()
     if raw_title and raw_title not in {"esto", "esta tarea", "esa tarea"}:
         return raw_title
+
+    if parsed_query.get("intent") == "create_followup":
+        return "Follow-up"
 
     context = conversation_context or {}
     if raw_title == "esto":
@@ -756,6 +793,143 @@ def _resolve_creation_project_target(
         return {"id": projects[0].id, "name": projects[0].name}
 
     return "No tengo un proyecto claro para crear eso. Decime el proyecto o hacelo desde una conversacion ya enfocada en ese proyecto."
+
+
+def _resolve_creation_temporal_fields(parsed_query: dict) -> dict:
+    due_hint = parsed_query.get("due_hint")
+    if not due_hint:
+        return {
+            "due_hint": None,
+            "time_scope": None,
+            "due_date": None,
+            "error_message": None,
+            "degraded": False,
+        }
+
+    resolved = resolve_due_hint(due_hint, today=date.today())
+    error_message = None
+    if not resolved.get("resolved"):
+        if resolved.get("reason") == "range_requires_concrete_day":
+            error_message = "Entiendo el alcance temporal, pero para guardarlo como fecha necesito un dia concreto."
+        else:
+            error_message = "No pude interpretar esa referencia temporal con suficiente claridad."
+
+    return {
+        "due_hint": due_hint,
+        "time_scope": resolved.get("time_scope") or parsed_query.get("time_scope"),
+        "due_date": resolved.get("due_date"),
+        "label": resolved.get("label"),
+        "degraded": bool(resolved.get("degraded")),
+        "error_message": error_message,
+    }
+
+
+def _handle_temporal_intent(
+    parsed_query: dict,
+    resolved_references: dict,
+    *,
+    user_query: str | None,
+    conversation_context: dict | None,
+) -> str:
+    context = conversation_context or {}
+    if _should_use_contextual_temporal_view(user_query, context):
+        response = _build_contextual_temporal_response(parsed_query, context)
+        if response:
+            return response
+
+    intent = parsed_query.get("intent")
+    time_scope = parsed_query.get("time_scope")
+    temporal_focus = parsed_query.get("temporal_focus")
+    parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
+
+    if intent == "get_missing_due_date_summary":
+        snapshot = get_missing_due_date_snapshot()
+        _attach_temporal_debug(parsed_query, snapshot, interpretation="missing_due_date")
+        return _format_missing_due_date_summary(snapshot)
+
+    if intent == "get_overdue_tasks_summary":
+        snapshot = get_temporal_task_snapshot("overdue")
+        _attach_temporal_debug(parsed_query, snapshot, interpretation="overdue")
+        return _format_temporal_summary(snapshot)
+
+    snapshot = get_temporal_task_snapshot(time_scope or "due_items", temporal_focus=temporal_focus)
+    _attach_temporal_debug(parsed_query, snapshot, interpretation=time_scope or "due_items")
+    return _format_temporal_summary(snapshot)
+
+
+def _should_use_contextual_temporal_view(user_query: str | None, context: dict) -> bool:
+    if not user_query or not context or not context.get("_isolated"):
+        return False
+    normalized = user_query.strip().lower()
+    return normalized.startswith("y ")
+
+
+def _build_contextual_temporal_response(parsed_query: dict, context: dict) -> str | None:
+    scope = context.get("scope")
+    if scope == "task" and context.get("task", {}).get("id"):
+        summary = get_task_operational_summary(context["task"]["id"])
+        if not summary:
+            return None
+        tasks = [_summary_to_task_like(summary)]
+    elif scope == "project" and context.get("project", {}).get("id"):
+        tasks = get_tasks_by_project_id(context["project"]["id"])
+    elif scope == "client" and context.get("client", {}).get("id"):
+        tasks = get_tasks_by_client_id(context["client"]["id"])
+    else:
+        return None
+
+    intent = parsed_query.get("intent")
+    if intent == "get_missing_due_date_summary":
+        snapshot = build_missing_due_date_snapshot_from_tasks(tasks, today=date.today())
+        parsed_query["_conversation_context"] = context
+        _attach_temporal_debug(parsed_query, snapshot, scope_override=f"contextual_{scope}", interpretation="missing_due_date")
+        return _format_missing_due_date_summary(snapshot, scope_label=_context_scope_name(context, scope))
+
+    time_scope = "overdue" if intent == "get_overdue_tasks_summary" else (parsed_query.get("time_scope") or "due_items")
+    snapshot = build_temporal_task_snapshot_from_tasks(
+        tasks,
+        time_scope=time_scope,
+        today=date.today(),
+        temporal_focus=parsed_query.get("temporal_focus"),
+    )
+    parsed_query["_conversation_context"] = context
+    _attach_temporal_debug(parsed_query, snapshot, scope_override=f"contextual_{scope}", interpretation=time_scope)
+    return _format_temporal_summary(snapshot, scope_label=_context_scope_name(context, scope))
+
+
+def _summary_to_task_like(summary: dict):
+    project = type("ProjectLike", (), {})()
+    client = type("ClientLike", (), {})()
+    client.id = summary.get("client_id")
+    client.name = summary.get("client_name")
+    project.id = summary.get("project_id")
+    project.name = summary.get("project_name")
+    project.client = client
+
+    task = type("TaskLike", (), {})()
+    task.id = summary.get("task_id")
+    task.title = summary.get("title")
+    task.project = project
+    task.status = summary.get("status")
+    task.priority = summary.get("priority")
+    task.due_date = summary.get("due_date")
+    task.last_note = summary.get("last_note")
+    task.next_action = summary.get("next_action")
+    task.updates = []
+    task.description = summary.get("description")
+    task.created_at = summary.get("created_at")
+    task.last_updated_at = summary.get("last_updated_at")
+    return task
+
+
+def _context_scope_name(context: dict, scope: str) -> str:
+    if scope == "task":
+        return context.get("task", {}).get("name") or "esta tarea"
+    if scope == "project":
+        return context.get("project", {}).get("name") or "este proyecto"
+    if scope == "client":
+        return context.get("client", {}).get("name") or "este cliente"
+    return "este contexto"
 
 
 def _handle_followup_intent(
@@ -2265,6 +2439,43 @@ def _format_global_recommendation_summary(task_snapshot: dict, project_snapshot:
     return "\n".join(lines)
 
 
+def _format_temporal_summary(snapshot: dict, scope_label: str | None = None) -> str:
+    items = snapshot.get("matched_items") or []
+    time_scope = snapshot.get("time_scope")
+    temporal_focus = snapshot.get("temporal_focus")
+    scope_prefix = f" dentro de {scope_label}" if scope_label else ""
+    label = {
+        "today": "vence hoy",
+        "tomorrow": "tenes para mañana",
+        "this_week": "vence esta semana",
+        "overdue": "esta vencido",
+        "due_items": "tiene fecha cargada",
+    }.get(time_scope, "entra en ese corte temporal")
+
+    if not items:
+        followup_note = " en tareas tipo follow-up" if temporal_focus == "followups" else ""
+        return f"No veo tareas abiertas que {label}{followup_note}{scope_prefix}."
+
+    lines = [f"Esto es lo que {label}{scope_prefix}:"]
+    for item in items[:8]:
+        lines.append(
+            f"- {item['title']} | Vence: {item['due_date'] or 'Sin fecha'} | Cliente: {item['client_name']} | Proyecto: {item['project_name']}"
+        )
+    return "\n".join(lines)
+
+
+def _format_missing_due_date_summary(snapshot: dict, scope_label: str | None = None) -> str:
+    items = snapshot.get("missing_due_items") or []
+    scope_prefix = f" dentro de {scope_label}" if scope_label else ""
+    if not items:
+        return f"No veo tareas abiertas sin fecha que hoy merezcan una fecha{scope_prefix}."
+
+    lines = [f"Estas tareas no tienen fecha y hoy merecerian una{scope_prefix}:"]
+    for item in items[:8]:
+        lines.append(_format_snapshot_item(item))
+    return "\n".join(lines)
+
+
 def _format_next_recommendation_followup(snapshot: dict) -> str:
     recommendations = snapshot.get("recommendations") or []
     if len(recommendations) < 2:
@@ -2839,6 +3050,40 @@ def _attach_recommendation_debug(parsed_query: dict, summary: dict, scope_overri
             "recommendations": summary.get("recommendations", [])[:3],
             "recommendation": summary.get("recommendation"),
             "items": summary.get("recommendations", [])[:3],
+        },
+    )
+
+
+def _attach_temporal_debug(
+    parsed_query: dict,
+    snapshot: dict,
+    *,
+    interpretation: str,
+    scope_override: str | None = None,
+) -> None:
+    items = snapshot.get("matched_items") or snapshot.get("missing_due_items") or []
+    parsed_query["_temporal_interpretation"] = interpretation
+    parsed_query["_temporal_scope"] = scope_override or snapshot.get("time_scope")
+    parsed_query["_temporal_result"] = {
+        "time_scope": snapshot.get("time_scope"),
+        "temporal_focus": snapshot.get("temporal_focus"),
+        "today": snapshot.get("today"),
+    }
+    parsed_query["_temporal_degraded"] = bool(snapshot.get("degraded"))
+    parsed_query["_temporal_due_items"] = [_debug_summary_item(item) for item in items[:5]]
+    parsed_query["_temporal_missing_due_items"] = [_debug_summary_item(item) for item in snapshot.get("missing_due_items", [])[:5]]
+    _store_response_snapshot(
+        parsed_query,
+        {
+            "response_kind": "temporal",
+            "scope": scope_override or "none",
+            "entity_name": snapshot.get("entity_name"),
+            "status_overview": f"Temporal: {snapshot.get('time_scope') or interpretation}",
+            "items": items[:5],
+            "highlights": items[:5],
+            "next_steps": [item for item in items if item.get("has_next_action")][:3],
+            "blockers": [item for item in items if item.get("is_blocked")][:3],
+            "recommendation": None,
         },
     )
 

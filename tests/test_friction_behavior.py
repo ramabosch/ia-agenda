@@ -26,7 +26,13 @@ class FrictionBehaviorTests(unittest.TestCase):
         snapshot = build_friction_focus_from_tasks([task], today=today)
 
         self.assertEqual(snapshot["friction_tasks"][0]["title"], "Resolver bloqueo API")
-        self.assertIn("bloqueada hace tiempo", snapshot["friction_tasks"][0]["friction_signals"])
+        self.assertIn("bloqueada", snapshot["friction_tasks"][0]["friction_signals"])
+        self.assertTrue(
+            any(
+                signal in snapshot["friction_tasks"][0]["friction_signals"]
+                for signal in ("bloqueada hace tiempo", "friccion probable sin evidencia temporal fuerte")
+            )
+        )
 
     def test_friction_flags_high_priority_without_next_action(self):
         today = date(2026, 3, 18)

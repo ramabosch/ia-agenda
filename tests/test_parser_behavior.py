@@ -119,6 +119,9 @@ class ParserBehaviorTests(unittest.TestCase):
         project_note_without_content = parse_user_query("suma una nota al proyecto")
         next_action = parse_user_query("dejame una proxima accion para manana")
         convert = parse_user_query("converti esto en tarea")
+        create_tomorrow = parse_user_query("crea una tarea para revisar indicadores para manana")
+        create_urgent_today = parse_user_query("agrega una tarea urgente para revisar backlog para hoy")
+        followup_friday = parse_user_query("deja follow-up para el viernes")
 
         self.assertEqual(create_task["intent"], "create_task")
         self.assertEqual(create_task["task_name"], "revisar indicadores")
@@ -135,6 +138,29 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(next_action["next_action"], "manana")
         self.assertEqual(convert["intent"], "create_task")
         self.assertEqual(convert["task_name"], "esto")
+        self.assertEqual(create_tomorrow["due_hint"], "manana")
+        self.assertEqual(create_tomorrow["time_scope"], "tomorrow")
+        self.assertEqual(create_urgent_today["task_name"], "revisar backlog")
+        self.assertEqual(create_urgent_today["new_priority"], "alta")
+        self.assertEqual(create_urgent_today["due_hint"], "hoy")
+        self.assertEqual(followup_friday["intent"], "create_followup")
+        self.assertEqual(followup_friday["due_hint"], "viernes")
+
+    def test_parse_temporal_queries(self):
+        due_today = parse_user_query("que vence hoy")
+        overdue = parse_user_query("que tengo atrasado")
+        tomorrow = parse_user_query("que tengo para manana")
+        week_followups = parse_user_query("que follow-ups vencen esta semana")
+        missing_due = parse_user_query("que no tiene fecha y deberia tenerla")
+
+        self.assertEqual(due_today["intent"], "get_due_tasks_summary")
+        self.assertEqual(due_today["time_scope"], "today")
+        self.assertEqual(overdue["intent"], "get_overdue_tasks_summary")
+        self.assertEqual(overdue["time_scope"], "overdue")
+        self.assertEqual(tomorrow["intent"], "get_due_tasks_summary")
+        self.assertEqual(tomorrow["time_scope"], "tomorrow")
+        self.assertEqual(week_followups["temporal_focus"], "followups")
+        self.assertEqual(missing_due["intent"], "get_missing_due_date_summary")
 
     def test_parse_contextual_followups(self):
         projects = parse_user_query("y sus proyectos?")

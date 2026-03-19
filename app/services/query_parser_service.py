@@ -31,6 +31,8 @@ GENERIC_ENTITY_TERMS = {
     "esto",
     "algo",
 }
+TEMPORAL_DAY_TERMS = ("lunes", "martes", "miercoles", "miércoles", "jueves", "viernes", "sabado", "sábado", "domingo")
+AMBIGUOUS_TEMPORAL_TERMS = ("pronto", "mas adelante", "más adelante", "despues", "después", "algun dia", "algún día")
 
 
 def parse_user_query(query: str) -> dict:
@@ -38,6 +40,7 @@ def parse_user_query(query: str) -> dict:
 
     result = (
         _parse_creation_intents(normalized)
+        or _parse_temporal_read_intents(normalized)
         or _parse_read_intents(normalized)
         or _parse_ambiguity_intents(normalized)
         or _parse_task_update_intents(normalized)
@@ -49,18 +52,21 @@ def parse_user_query(query: str) -> dict:
 def _parse_creation_intents(normalized: str) -> dict | None:
     create_task_prefix = r"(?:cre(?:a|á)\s+una|cre(?:a|á)|agreg(?:a|á)\s+una|agreg(?:a|á)|sum(?:a|á)\s+una|sum(?:a|á))"
     create_followup_prefix = r"(?:cre(?:a|á)\s+un|cre(?:a|á)|agreg(?:a|á)\s+un|agreg(?:a|á)|sum(?:a|á)\s+un|sum(?:a|á))"
-    priority = "alta" if any(token in normalized for token in ["alta prioridad", "prioridad alta"]) else None
+    priority = "alta" if any(token in normalized for token in ["alta prioridad", "prioridad alta", "urgente"]) else None
 
-    match = re.search(rf"^{create_task_prefix}\s+tarea\s+a\s+(.+?)\s+para\s+(.+)$", normalized)
+    stripped_normalized, due_hint, time_scope = _extract_supported_due_hint(normalized)
+
+    match = re.search(rf"^{create_task_prefix}\s+tarea\s+a\s+(.+?)\s+para\s+(.+)$", stripped_normalized)
     if match:
-        return {
+        payload = {
             "intent": "create_task",
             "client_name": match.group(1).strip(),
             "task_name": match.group(2).strip(),
             "new_priority": priority,
         }
+        return _apply_temporal_fields(payload, due_hint, time_scope)
 
-    match = re.search(rf"^{create_task_prefix}\s+tarea\s+en\s+(.+?)(?:\s+para\s+(.+)|\s*:\s*(.+))?$", normalized)
+    match = re.search(rf"^{create_task_prefix}\s+tarea\s+en\s+(.+?)(?:\s+para\s+(.+)|\s*:\s*(.+))?$", stripped_normalized)
     if match:
         task_title = (match.group(2) or match.group(3) or "").strip() or None
         target = match.group(1).strip()
@@ -73,26 +79,39 @@ def _parse_creation_intents(normalized: str) -> dict | None:
             payload["project_name"] = target
         else:
             payload["entity_hint"] = target
-        return payload
+        return _apply_temporal_fields(payload, due_hint, time_scope)
 
-    match = re.search(rf"^{create_task_prefix}\s+tarea(?:\s+(?:de\s+)?)?(?:alta prioridad|prioridad alta)?\s+para\s+(.+)$", normalized)
+    match = re.search(rf"^{create_task_prefix}\s+tarea(?:\s+(?:de\s+)?)?(?:urgente|alta prioridad|prioridad alta)?\s+para\s+(.+)$", stripped_normalized)
     if match:
-        return {
+        payload = {
             "intent": "create_task",
             "task_name": match.group(1).strip(),
             "new_priority": priority,
         }
+        return _apply_temporal_fields(payload, due_hint, time_scope)
+
+    match = re.search(rf"^{create_task_prefix}\s+tarea(?:\s+(?:urgente|alta prioridad|prioridad alta))?$", stripped_normalized)
+    if match:
+        return _apply_temporal_fields(
+            {
+                "intent": "create_task",
+                "task_name": None,
+                "new_priority": priority,
+            },
+            due_hint,
+            time_scope,
+        )
 
     if any(phrase in normalized for phrase in ["converti esto en tarea", "convertí esto en tarea", "convierte esto en tarea"]):
-        return {"intent": "create_task", "task_name": "esto"}
+        return _apply_temporal_fields({"intent": "create_task", "task_name": "esto"}, due_hint, time_scope)
 
-    match = re.search(rf"^{create_followup_prefix}\s+follow-?up(?:\s+para\s+(.+))?$", normalized)
+    match = re.search(rf"^(?:dej(?:a|á)|{create_followup_prefix})\s+follow-?up(?:\s+para\s+(.+))?$", stripped_normalized)
     if match:
-        return {
+        return _apply_temporal_fields({
             "intent": "create_followup",
             "task_name": match.group(1).strip() if match and match.group(1) else None,
             "new_priority": priority,
-        }
+        }, due_hint, time_scope)
 
     match = re.search(r"(?:sum(?:a|á)|agreg(?:a|á)|dej(?:a|á))\s+una?\s*nota\s+al\s+proyecto(?:\s+(.+?))?\s*:\s*(.+)$", normalized)
     if match:
@@ -129,6 +148,67 @@ def _parse_creation_intents(normalized: str) -> dict | None:
         }
 
     return None
+
+
+def _parse_temporal_read_intents(normalized: str) -> dict | None:
+    if any(phrase in normalized for phrase in ["que vence hoy", "que vence ahora", "y que vence"]):
+        payload = {"intent": "get_due_tasks_summary", "time_scope": "today"}
+        if normalized.startswith("y "):
+            payload["entity_hint"] = "aca"
+        return payload
+
+    if any(phrase in normalized for phrase in ["que tengo para manana", "que tengo para mañana", "y para manana", "y para mañana"]):
+        payload = {"intent": "get_due_tasks_summary", "time_scope": "tomorrow"}
+        if normalized.startswith("y "):
+            payload["entity_hint"] = "aca"
+        return payload
+
+    if any(phrase in normalized for phrase in ["que follow-ups vencen esta semana", "que followups vencen esta semana"]):
+        return {"intent": "get_due_tasks_summary", "time_scope": "this_week", "temporal_focus": "followups"}
+
+    if any(phrase in normalized for phrase in ["que tendria que cerrar esta semana", "que tendría que cerrar esta semana"]):
+        return {"intent": "get_due_tasks_summary", "time_scope": "this_week", "temporal_focus": "closing"}
+
+    if any(phrase in normalized for phrase in ["que tengo atrasado", "que esta vencido", "que está vencido", "y que esta atrasado", "y que está atrasado"]):
+        payload = {"intent": "get_overdue_tasks_summary", "time_scope": "overdue"}
+        if normalized.startswith("y "):
+            payload["entity_hint"] = "aca"
+        return payload
+
+    if any(phrase in normalized for phrase in ["que no tiene fecha y deberia tenerla", "que no tiene fecha y debería tenerla"]):
+        return {"intent": "get_missing_due_date_summary"}
+
+    return None
+
+
+def _extract_supported_due_hint(normalized: str) -> tuple[str, str | None, str | None]:
+    patterns = [
+        (r"\s+para\s+hoy$", "hoy", "today"),
+        (r"\s+para\s+mañana$", "mañana", "tomorrow"),
+        (r"\s+para\s+manana$", "manana", "tomorrow"),
+        (r"\s+para\s+esta\s+semana$", "esta semana", "this_week"),
+    ]
+    for day_name in TEMPORAL_DAY_TERMS:
+        patterns.append((rf"\s+para\s+(?:el\s+)?{day_name}$", day_name, "weekday"))
+
+    for pattern, due_hint, time_scope in patterns:
+        if re.search(pattern, normalized):
+            return re.sub(pattern, "", normalized).strip(), due_hint, time_scope
+
+    for term in AMBIGUOUS_TEMPORAL_TERMS:
+        pattern = rf"\s+para\s+{term}$"
+        if re.search(pattern, normalized):
+            return re.sub(pattern, "", normalized).strip(), term, "ambiguous"
+
+    return normalized, None, None
+
+
+def _apply_temporal_fields(payload: dict, due_hint: str | None, time_scope: str | None) -> dict:
+    if due_hint:
+        payload["due_hint"] = due_hint
+    if time_scope:
+        payload["time_scope"] = time_scope
+    return payload
 
 
 def _parse_ambiguity_intents(normalized: str) -> dict | None:

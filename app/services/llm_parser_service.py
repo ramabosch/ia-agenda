@@ -40,6 +40,9 @@ ALLOWED_INTENTS = {
     "get_missing_next_actions_summary",
     "get_followup_needed_summary",
     "get_push_today_summary",
+    "get_due_tasks_summary",
+    "get_overdue_tasks_summary",
+    "get_missing_due_date_summary",
     "clarify_entity_reference",
     "create_task",
     "create_followup",
@@ -78,6 +81,9 @@ EMPTY_PAYLOAD = {
     "followup_focus": None,
     "filter_mode": None,
     "rephrase_style": None,
+    "due_hint": None,
+    "time_scope": None,
+    "temporal_focus": None,
 }
 
 EXAMPLES_BLOCK = """
@@ -558,6 +564,9 @@ Intentos permitidos:
 - get_missing_next_actions_summary
 - get_followup_needed_summary
 - get_push_today_summary
+- get_due_tasks_summary
+- get_overdue_tasks_summary
+- get_missing_due_date_summary
 - clarify_entity_reference
 - create_task
 - create_followup
@@ -595,7 +604,10 @@ Schema exacto:
   "recommendation_focus": null,
   "followup_focus": null,
   "filter_mode": null,
-  "rephrase_style": null
+  "rephrase_style": null,
+  "due_hint": null,
+  "time_scope": null,
+  "temporal_focus": null
 }}
 
 {EXAMPLES_BLOCK}
@@ -681,6 +693,9 @@ def _validate_payload_shape(payload: dict[str, Any]) -> dict[str, Any] | None:
     clean["followup_focus"] = _normalize_nullable_string(clean.get("followup_focus"))
     clean["filter_mode"] = _normalize_nullable_string(clean.get("filter_mode"))
     clean["rephrase_style"] = _normalize_nullable_string(clean.get("rephrase_style"))
+    clean["due_hint"] = _normalize_nullable_string(clean.get("due_hint"))
+    clean["time_scope"] = _normalize_nullable_string(clean.get("time_scope"))
+    clean["temporal_focus"] = _normalize_nullable_string(clean.get("temporal_focus"))
 
     clean["task_id"] = _normalize_int_or_none(clean.get("task_id"))
     clean["project_id"] = _normalize_int_or_none(clean.get("project_id"))
@@ -749,6 +764,16 @@ def _coerce_semantics(payload: dict[str, Any], user_query: str) -> dict[str, Any
             payload["intent"] = "unknown"
         if not project_name and not payload.get("entity_hint"):
             payload["project_name"] = "este proyecto"
+
+    if intent == "get_due_tasks_summary":
+        if payload.get("time_scope") not in {"today", "tomorrow", "this_week", "due_items"}:
+            payload["intent"] = "unknown"
+
+    if intent == "get_overdue_tasks_summary":
+        payload["time_scope"] = "overdue"
+
+    if intent == "get_missing_due_date_summary":
+        payload["time_scope"] = None
 
     if intent == "get_task_summary":
         if not task_id and not task_name:
