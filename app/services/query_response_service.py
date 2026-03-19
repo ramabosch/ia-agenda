@@ -440,7 +440,7 @@ def build_response_from_query(
         parsed_query["_update_type"] = "task_update"
         parsed_query["_update_real"] = True
         parsed_query["_update_result"] = {"task_id": task_id, "new_value": content}
-        return f"Listo. Registre un nuevo update en la tarea {task_id}."
+        return f"Listo: registre un update nuevo en la tarea {task_id}."
 
     if intent == "add_task_update_by_name":
         task_message = _require_resolved_entity(resolved_references, "task", "tarea", action_text="agregar el update")
@@ -457,7 +457,7 @@ def build_response_from_query(
         parsed_query["_update_real"] = True
         parsed_query["_update_result"] = {"task_id": task["id"], "task_title": task["name"], "field": "task_update", "new_value": content}
         _remember_context(parsed_query, resolved_references, focus_scope="task")
-        return f"Listo. Agregue un update a la tarea '{task['name']}'."
+        return f"Listo: agregue un update a la tarea '{task['name']}'."
 
     if intent == "get_today_activity":
         logs = get_conversations_for_today()
@@ -585,12 +585,12 @@ def _finalize_update_response(parsed_query: dict, resolved_references: dict, upd
 
     if not result.get("updated"):
         if result.get("error") == "not_found":
-            return "No encontre la tarea que queres actualizar."
+            return "No encontre una tarea clara para actualizar."
         if result.get("error") == "invalid_priority":
             return "No pude interpretar la prioridad nueva para esa tarea."
         if result.get("error") == "no_change":
-            return f"No hice cambios en '{result.get('task_title', 'la tarea')}'. El valor ya era '{result.get('new_value')}'."
-        return "No pude aplicar la actualizacion solicitada."
+            return f"No hice cambios en '{result.get('task_title', 'la tarea')}'. Ya estaba en '{result.get('new_value')}'."
+        return "No pude aplicar ese cambio en la tarea."
 
     field_labels = {
         "status": "estado",
@@ -602,9 +602,9 @@ def _finalize_update_response(parsed_query: dict, resolved_references: dict, upd
     new_value = result.get("new_value") or "vacio"
 
     if result["field"] == "status" and old_value == new_value and result.get("reason"):
-        response = f"Listo. La tarea '{result['task_title']}' sigue en estado '{new_value}', y ademas registre la nota '{result['reason']}'."
+        response = f"Listo: la tarea '{result['task_title']}' sigue en estado '{new_value}' y ademas deje la nota '{result['reason']}'."
     else:
-        response = f"Listo. Actualice la tarea '{result['task_title']}'. Cambio {field_labels.get(result['field'], result['field'])}: '{old_value}' -> '{new_value}'."
+        response = f"Listo: actualice la tarea '{result['task_title']}'. {field_labels.get(result['field'], result['field']).capitalize()}: '{old_value}' -> '{new_value}'."
 
     _set_audit_trace(
         parsed_query,
@@ -638,8 +638,8 @@ def _handle_compound_query(
         if sub_intent in UNSAFE_COMPOUND_INTENTS:
             degraded_parts.append(sub_intent or "unknown")
             sections.append(
-                f"{label}:\nNo ejecute la parte de accion dentro de una consulta compuesta. "
-                "Si queres hacer ese cambio, mandamelo separado."
+                f"{label}:\nNo ejecute la parte de accion dentro de este pedido compuesto. "
+                "Si queres hacer ese cambio, mandamelo en un mensaje separado."
             )
             continue
 
@@ -669,7 +669,7 @@ def _handle_compound_query(
     parsed_query["_compound_degraded_parts"] = degraded_parts
     parsed_query["_compound_reused_snapshot"] = reused_snapshot
     parsed_query["_compound_partial_clarification"] = partial_clarification
-    response = "\n\n".join(sections)
+    response = _format_compound_response(sections, degraded_parts=degraded_parts)
     _set_audit_trace(
         parsed_query,
         user_query=user_query,
@@ -751,7 +751,7 @@ def _handle_project_note_creation(
     if not note_content:
         parsed_query["_creation_aborted"] = True
         parsed_query["_creation_result"] = {"error": "missing_note"}
-        return _abort_with_context(parsed_query, "Necesito el contenido de la nota para agregarla al proyecto.")
+        return _abort_with_context(parsed_query, "Necesito el contenido de la nota para dejarla en el proyecto.")
 
     project = _resolve_creation_project_target(
         parsed_query,
@@ -769,7 +769,7 @@ def _handle_project_note_creation(
     parsed_query["_creation_real"] = bool(result.get("updated"))
     if not result.get("updated"):
         parsed_query["_creation_aborted"] = True
-        return _abort_with_context(parsed_query, "No pude registrar la nota en ese proyecto.")
+        return _abort_with_context(parsed_query, "No pude dejar la nota en ese proyecto.")
 
     parsed_query["_update_type"] = "project_note"
     parsed_query["_update_real"] = True
@@ -778,7 +778,7 @@ def _handle_project_note_creation(
         **_base_conversation_context(parsed_query, "project"),
         "project": {"id": project["id"], "name": project["name"]},
     }
-    response = f"Listo. Agregue una nota al proyecto '{project['name']}'. Contenido: '{note_content}'."
+    response = f"Listo: agregue una nota al proyecto '{project['name']}'. Nota: '{note_content}'."
     _set_audit_trace(
         parsed_query,
         user_query=parsed_query.get("_last_user_query"),
@@ -849,7 +849,7 @@ def _handle_task_creation(
     }
 
     parts = [
-        f"Listo. Cree una tarea nueva: '{result['task_title']}'.",
+        f"Listo: cree la tarea nueva '{result['task_title']}'.",
         f"Proyecto: {project['name']}.",
         f"Prioridad: {result['priority']}.",
     ]
@@ -1149,7 +1149,7 @@ def _handle_followup_intent(
         if resolved_references.get("security_blocked"):
             return _abort_with_context(
                 parsed_query,
-                "No tengo contexto aislado actual para decirte que sigue con seguridad. Si queres, pedi un resumen global de proximos pasos.",
+                _safe_context_message("decirte que sigue", "Si queres, pedi un resumen global de proximos pasos."),
             )
 
     snapshot = get_followup_task_snapshot()
@@ -1236,7 +1236,7 @@ def _handle_clarification_intent(parsed_query: dict, resolved_references: dict) 
     if resolved_references.get("security_blocked"):
         return _abort_with_context(
             parsed_query,
-            "No tengo contexto aislado actual suficiente para interpretar esa referencia corta. Decime el cliente, proyecto o tarea exacta.",
+            _safe_context_message("interpretar esa referencia corta", "Decime el cliente, proyecto o tarea exacta."),
         )
 
     if resolved_references.get("clarification_needed"):
@@ -1294,7 +1294,7 @@ def _handle_operational_summary_intent(
     if resolved_references.get("security_blocked"):
         return _abort_with_context(
             parsed_query,
-            "No tengo contexto aislado actual suficiente para resumir eso con seguridad. Decime el cliente, proyecto o tarea exacta.",
+            _safe_context_message("resumir eso", "Decime el cliente, proyecto o tarea exacta."),
         )
 
     if resolved_references.get("clarification_needed") or resolved_references.get("ambiguous"):
@@ -1333,7 +1333,7 @@ def _handle_operational_summary_intent(
 
     return _abort_with_context(
         parsed_query,
-        "No pude identificar con claridad que cliente, proyecto o tarea queres resumir.",
+        "No pude ubicar con claridad que cliente, proyecto o tarea queres resumir.",
     )
 
 
@@ -1406,7 +1406,7 @@ def _handle_operational_friction_intent(
     if resolved_references.get("security_blocked"):
         return _abort_with_context(
             parsed_query,
-            "No tengo contexto aislado actual suficiente para analizar que esta frenado con seguridad. Decime el cliente, proyecto o tarea exacta.",
+            _safe_context_message("analizar que esta frenado", "Decime el cliente, proyecto o tarea exacta."),
         )
 
     if resolved_references.get("clarification_needed") or resolved_references.get("ambiguous"):
@@ -1587,7 +1587,7 @@ def _handle_operational_recommendation_intent(
     if resolved_references.get("security_blocked"):
         return _abort_with_context(
             parsed_query,
-            "No tengo contexto aislado actual suficiente para recomendar eso con seguridad. Decime el cliente, proyecto o tarea exacta.",
+            _safe_context_message("recomendar eso", "Decime el cliente, proyecto o tarea exacta."),
         )
 
     if resolved_references.get("clarification_needed") or resolved_references.get("ambiguous"):
@@ -1793,7 +1793,7 @@ def _handle_conversational_continuity_intent(
     if not context or not context.get("_isolated"):
         return _abort_with_context(
             parsed_query,
-            "No tengo contexto aislado actual para continuar esa conversacion con seguridad.",
+            _safe_context_message("continuar esa conversacion"),
         )
 
     if parsed_query.get("intent") == "get_followup_focus_summary":
@@ -1802,13 +1802,13 @@ def _handle_conversational_continuity_intent(
             response = _build_contextual_friction_summary(parsed_query, context, context.get("scope"))
             if response:
                 return response
-            return _abort_with_context(parsed_query, "No pude reutilizar el contexto actual para profundizar en lo que preocupa.")
+            return _abort_with_context(parsed_query, "No pude reaprovechar el contexto actual para profundizar en lo que preocupa.")
 
         if followup_focus == "next_after_recommendation":
             if not snapshot or not snapshot.get("recommendations"):
                 return _abort_with_context(
                     parsed_query,
-                    "No tengo una recomendacion previa clara en esta conversacion actual para decirte que iria despues.",
+                    "No tengo una recomendacion previa clara en esta conversacion actual para decirte que vendria despues.",
                 )
             response = _format_next_recommendation_followup(snapshot)
             _store_response_snapshot(
@@ -1826,7 +1826,7 @@ def _handle_conversational_continuity_intent(
         if not snapshot or not snapshot.get("recommendations"):
             return _abort_with_context(
                 parsed_query,
-                "No tengo una recomendacion previa clara en esta conversacion actual para explicarte por que seria la primera.",
+                "No tengo una recomendacion previa clara en esta conversacion actual para explicarte por que iria primero.",
             )
         response = _format_recommendation_explanation(snapshot)
         _store_response_snapshot(
@@ -1843,7 +1843,7 @@ def _handle_conversational_continuity_intent(
         if not snapshot:
             return _abort_with_context(
                 parsed_query,
-                "No tengo una respuesta previa clara en esta conversacion actual para filtrarla.",
+                "No tengo una respuesta previa clara en esta conversacion actual para filtrarla mejor.",
             )
         response, filtered_snapshot = _format_filtered_context_summary(snapshot, parsed_query.get("filter_mode"))
         parsed_query["_adaptive_degraded"] = bool(filtered_snapshot.get("degraded"))
@@ -1855,7 +1855,7 @@ def _handle_conversational_continuity_intent(
         if not snapshot:
             return _abort_with_context(
                 parsed_query,
-                "No tengo una respuesta previa clara en esta conversacion actual para reformularla.",
+                "No tengo una respuesta previa clara en esta conversacion actual para reformularla mejor.",
             )
         response, rephrased_snapshot = _format_rephrased_summary(snapshot, parsed_query.get("rephrase_style"))
         parsed_query["_adaptive_degraded"] = bool(rephrased_snapshot.get("degraded"))
@@ -1867,7 +1867,7 @@ def _handle_conversational_continuity_intent(
         if not snapshot:
             return _abort_with_context(
                 parsed_query,
-                "No tengo una respuesta previa clara en esta conversacion actual para traducirla a una version para cliente.",
+                "No tengo una respuesta previa clara en esta conversacion actual para llevarla a una version para cliente.",
             )
         response, client_snapshot = _format_client_facing_summary(context, snapshot)
         parsed_query["_adaptive_output_mode"] = "client_facing"
@@ -1876,7 +1876,7 @@ def _handle_conversational_continuity_intent(
         _store_response_snapshot(parsed_query, client_snapshot)
         return response
 
-    return _abort_with_context(parsed_query, "No pude interpretar ese follow-up conversacional con seguridad.")
+    return _abort_with_context(parsed_query, "No pude interpretar ese follow-up con suficiente claridad.")
 
 
 def _handle_audit_trace_intent(
@@ -1887,7 +1887,7 @@ def _handle_audit_trace_intent(
 ) -> str:
     trace = _get_recent_audit_trace(conversation_context)
     if not trace:
-        return _abort_with_context(parsed_query, "No tengo una traza reciente y segura para auditar ese turno.")
+        return _abort_with_context(parsed_query, "No tengo una traza reciente y segura en esta conversacion para auditar ese turno.")
 
     focus = parsed_query.get("audit_focus") or "recent"
     parsed_query["_audit_focus"] = focus
@@ -2482,35 +2482,34 @@ def _build_clarification_response(resolved_references: dict, prefix: str | None 
     candidate_types = resolved_references.get("candidate_types") or []
 
     if reason == "missing_context":
-        return "No tengo contexto aislado actual suficiente para resolver esa referencia. Decime el cliente, proyecto o tarea exacta."
+        return _safe_context_message("resolver esa referencia", "Decime el cliente, proyecto o tarea exacta.")
 
     if reason == "generic_request":
         return (
-            "Necesito un poco mas de precision para saber a que te referis.\n"
+            "Necesito un poco mas de precision para ubicarlo bien.\n"
             "Decime si queres ver un cliente, un proyecto o una tarea concreta."
         )
 
     if not candidates:
         return (
-            "No pude identificar una entidad clara con esa referencia.\n"
-            "Proba con el nombre del cliente, proyecto o tarea exacta."
+            "No pude ubicar una entidad clara con esa referencia.\n"
+            "Proba con el nombre exacto del cliente, proyecto o tarea."
         )
 
     if len(candidate_types) == 1:
-        lines = [prefix or f"Necesito que me aclares cual {_scope_label(candidate_types[0])} queres."]
+        lines = [prefix or f"Necesito que me aclares cual {_scope_label(candidate_types[0])} queres ver."]
     else:
-        lines = [prefix or "Necesito que me aclares a que te referis."]
-    lines.append("Vi estas coincidencias posibles:")
+        lines = [prefix or "Necesito que me aclares un poco mas a que te referis."]
+    lines.append("Estas son las coincidencias posibles que mejor matchean:")
     for item in candidates[:4]:
-        scope_label = _scope_label(item["scope"])
-        detail_parts = [scope_label]
+        detail_parts = [_scope_label(item["scope"])]
         if item.get("client_name"):
             detail_parts.append(f"cliente: {item['client_name']}")
         if item.get("project_name"):
             detail_parts.append(f"proyecto: {item['project_name']}")
         lines.append(f"- {item['name']} ({' | '.join(detail_parts)})")
     lines.append("")
-    lines.append("Si queres, te lo puedo resumir, actualizar o mostrar proximos pasos del que elijas.")
+    lines.append("Si queres, te lo puedo resumir, marcar lo que preocupa o mostrar proximos pasos del que elijas.")
     return "\n".join(lines)
 
 
@@ -2519,6 +2518,20 @@ def _format_ambiguity_message(prefix: str, matches: list[dict]) -> str:
     for item in matches[:5]:
         lines.append(f"- {item['name']}")
     return "\n".join(lines)
+
+
+def _safe_context_message(action: str, suggestion: str | None = None) -> str:
+    message = f"No tengo contexto aislado actual para {action} con seguridad."
+    if suggestion:
+        return f"{message} {suggestion}"
+    return message
+
+
+def _format_compound_response(sections: list[str], *, degraded_parts: list[str]) -> str:
+    response = "\n\n".join(sections)
+    if not degraded_parts or len(degraded_parts) == len(sections):
+        return response
+    return f"Pude resolver una parte del pedido y la otra la deje aclarada.\n\n{response}"
 
 
 def _format_date(value):
@@ -3353,42 +3366,42 @@ def _format_audit_recent(trace: dict) -> str:
     action_type = trace.get("action_type") or "consulta"
     action_status = trace.get("action_status") or "informational"
     if action_status == "executed":
-        return f"Recien ejecute '{action_type}'. Resumen: {trace.get('summary')}"
+        return f"Recien respondi y ademas hice esto: ejecute '{action_type}'. {trace.get('summary')}"
     if action_status == "blocked":
-        return f"Recien no ejecute nada: quedo bloqueado por {trace.get('reason') or 'seguridad'}. Resumen: {trace.get('summary')}"
+        return f"Recien respondi sin ejecutar cambios. Lo frene por {trace.get('reason') or 'seguridad'}. {trace.get('summary')}"
     if action_status == "degraded":
-        return f"Recien respondi en modo degradado. Motivo: {trace.get('reason') or 'falta de contexto o precision'}. Resumen: {trace.get('summary')}"
-    return f"Recien respondi una consulta de tipo '{trace.get('intent')}'. Resumen: {trace.get('summary')}"
+        return f"Recien te respondi con una salida parcial. Motivo: {trace.get('reason') or 'falta de contexto o precision'}. {trace.get('summary')}"
+    return f"Recien te respondi una consulta sobre '{trace.get('intent')}'. {trace.get('summary')}"
 
 
 def _format_audit_resolution(trace: dict) -> str:
     resolved = trace.get("resolved_entities") or {}
     if not resolved:
-        return "No llegue a resolver una entidad clara en el ultimo turno."
+        return "En el ultimo turno no llegue a resolver una entidad clara."
     parts = []
     for scope in ("client", "project", "task"):
         item = resolved.get(scope)
         if item:
             parts.append(f"{_scope_label(scope)}: {item.get('name')}")
-    return "Esto fue lo que resolvi en el ultimo turno: " + " | ".join(parts)
+    return "En el ultimo turno resolvi esto: " + " | ".join(parts)
 
 
 def _format_audit_blocked(trace: dict) -> str:
     if trace.get("action_status") != "blocked":
         return "En el ultimo turno no quedo nada bloqueado por seguridad."
     candidates = trace.get("candidates") or []
-    lines = [f"En el ultimo turno bloquee la accion. Motivo: {trace.get('reason') or 'seguridad'}."]
+    lines = [f"En el ultimo turno frene la accion por {trace.get('reason') or 'seguridad'}."]
     if candidates:
-        lines.append("Candidatos involucrados:")
+        lines.append("Estos eran los candidatos mas probables:")
         for item in candidates[:4]:
             lines.append(f"- {item.get('name')} ({_scope_label(item.get('scope'))})")
     return "\n".join(lines)
 
 
 def _format_audit_understood(trace: dict) -> str:
-    parts = [f"Entendi el intent '{trace.get('intent')}'."]
+    parts = [f"Entendi el pedido como '{trace.get('intent')}'."]
     if trace.get("sub_intents"):
-        parts.append(f"Sub-intents: {', '.join(item for item in trace['sub_intents'] if item)}.")
+        parts.append(f"Lo parti en: {', '.join(item for item in trace['sub_intents'] if item)}.")
     if trace.get("resolved_entities"):
         parts.append(_format_audit_resolution(trace))
     elif trace.get("candidates"):
@@ -3401,15 +3414,15 @@ def _format_audit_action(trace: dict) -> str:
         return "En el ultimo turno no ejecute una accion operativa."
     affected = trace.get("affected_entity") or {}
     if affected.get("name"):
-        return f"En el ultimo turno ejecute '{trace.get('action_type')}' sobre {affected.get('name')}."
+        return f"En el ultimo turno ejecute '{trace.get('action_type')}' sobre '{affected.get('name')}'."
     return f"En el ultimo turno ejecute '{trace.get('action_type')}'."
 
 
 def _format_audit_reason(trace: dict) -> str:
     reason = trace.get("reason")
     if reason:
-        return f"La razon principal del ultimo turno fue: {reason}."
-    return f"La razon operativa que deje fue: {trace.get('summary')}"
+        return f"La razon principal fue esta: {reason}."
+    return f"La razon operativa mas clara que deje fue: {trace.get('summary')}"
 
 
 def _abort_with_context(parsed_query: dict, message: str) -> str:
