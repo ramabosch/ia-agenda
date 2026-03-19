@@ -265,6 +265,9 @@ def get_task_operational_summary(task_id: int):
         updates = task.updates if task.updates else []
         latest_update = updates[0].content if updates else None
 
+        project = _safe_related(task, "project")
+        client = _safe_related(project, "client")
+
         return {
             "task_id": task.id,
             "title": task.title,
@@ -275,10 +278,10 @@ def get_task_operational_summary(task_id: int):
             "last_note": task.last_note,
             "next_action": task.next_action,
             "last_updated_at": task.last_updated_at,
-            "project_id": task.project.id if task.project else None,
-            "project_name": task.project.name if task.project else "Desconocido",
-            "client_id": task.project.client.id if task.project and task.project.client else None,
-            "client_name": task.project.client.name if task.project and task.project.client else "Desconocido",
+            "project_id": project.id if project else None,
+            "project_name": project.name if project else "Desconocido",
+            "client_id": client.id if client else None,
+            "client_name": client.name if client else "Desconocido",
             "updates_count": len(updates),
             "latest_update": latest_update,
         }
@@ -925,8 +928,8 @@ def build_task_recommendation_summary(summary: dict, today: date | None = None, 
 
 
 def _serialize_task_for_executive(task, today: date) -> dict:
-    project = task.project
-    client = project.client if project else None
+    project = _safe_related(task, "project")
+    client = _safe_related(project, "client")
     due_date = task.due_date
     status = task.status
     priority = task.priority
@@ -1334,6 +1337,12 @@ def _build_friction_signals(
 def _days_since(value, today: date) -> int | None:
     if value is None:
         return None
+    if isinstance(value, date) and not hasattr(value, "hour"):
+        return (today - value).days
+    try:
+        return (today - value.date()).days
+    except Exception:
+        return None
 
 
 def _normalize_temporal_text(value: str | None) -> str:
@@ -1351,10 +1360,13 @@ def _normalize_temporal_text(value: str | None) -> str:
         normalized = normalized.replace(source, target)
     normalized = normalized.replace("el ", "").strip()
     return normalized
-    if isinstance(value, date) and not hasattr(value, "hour"):
-        return (today - value).days
+
+
+def _safe_related(entity, attr: str):
+    if entity is None:
+        return None
     try:
-        return (today - value.date()).days
+        return getattr(entity, attr, None)
     except Exception:
         return None
 

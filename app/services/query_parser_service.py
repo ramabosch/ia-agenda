@@ -31,6 +31,7 @@ GENERIC_ENTITY_TERMS = {
     "esto",
     "algo",
 }
+DESCRIPTOR_PREFIXES = ("el de ", "la de ", "el ", "la ")
 TEMPORAL_DAY_TERMS = ("lunes", "martes", "miercoles", "miércoles", "jueves", "viernes", "sabado", "sábado", "domingo")
 AMBIGUOUS_TEMPORAL_TERMS = ("pronto", "mas adelante", "más adelante", "despues", "después", "algun dia", "algún día")
 
@@ -97,6 +98,15 @@ def _parse_compound_intents(normalized: str) -> dict | None:
             second_part = "que esta bloqueado"
         elif second_part == "que sigue":
             second_part = "y que sigue"
+        elif second_part in {
+            "que haria primero",
+            "que harias primero",
+            "que harías primero",
+            "que haria ahora",
+            "que harias ahora",
+            "que harías ahora",
+        }:
+            second_part = "que haria primero"
 
         if not first_part or not second_part or first_part == second_part:
             continue
@@ -130,7 +140,7 @@ def _parse_creation_intents(normalized: str) -> dict | None:
             "task_name": match.group(2).strip(),
             "new_priority": priority,
         }
-        return _apply_temporal_fields(payload, due_hint, time_scope)
+        return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
 
     match = re.search(rf"^{create_task_prefix}\s+tarea\s+en\s+(.+?)(?:\s+para\s+(.+)|\s*:\s*(.+))?$", stripped_normalized)
     if match:
@@ -141,11 +151,23 @@ def _parse_creation_intents(normalized: str) -> dict | None:
             "task_name": task_title,
             "new_priority": priority,
         }
-        if "proyecto" in target:
+        if "proyecto" in target or target.startswith(("el dashboard", "dashboard ", "el onboarding", "onboarding ")):
             payload["project_name"] = target
+            payload["expected_scope"] = "project"
         else:
             payload["entity_hint"] = target
-        return _apply_temporal_fields(payload, due_hint, time_scope)
+        return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
+
+    match = re.search(rf"^{create_task_prefix}\s+tarea\s+al\s+proyecto\s+de\s+(.+?)(?:\s+para\s+(.+)|\s*:\s*(.+))?$", stripped_normalized)
+    if match:
+        payload = {
+            "intent": "create_task",
+            "project_name": match.group(1).strip(),
+            "task_name": ((match.group(2) or match.group(3) or "").strip() or None),
+            "new_priority": priority,
+            "expected_scope": "project",
+        }
+        return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
 
     match = re.search(rf"^{create_task_prefix}\s+tarea(?:\s+(?:de\s+)?)?(?:urgente|alta prioridad|prioridad alta)?\s+para\s+(.+)$", stripped_normalized)
     if match:
@@ -154,11 +176,11 @@ def _parse_creation_intents(normalized: str) -> dict | None:
             "task_name": match.group(1).strip(),
             "new_priority": priority,
         }
-        return _apply_temporal_fields(payload, due_hint, time_scope)
+        return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
 
     match = re.search(rf"^{create_task_prefix}\s+tarea(?:\s+(?:urgente|alta prioridad|prioridad alta))?$", stripped_normalized)
     if match:
-        return _apply_temporal_fields(
+        return _augment_targeting_payload(_apply_temporal_fields(
             {
                 "intent": "create_task",
                 "task_name": None,
@@ -166,18 +188,18 @@ def _parse_creation_intents(normalized: str) -> dict | None:
             },
             due_hint,
             time_scope,
-        )
+        ))
 
     if any(phrase in normalized for phrase in ["converti esto en tarea", "convertí esto en tarea", "convierte esto en tarea"]):
-        return _apply_temporal_fields({"intent": "create_task", "task_name": "esto"}, due_hint, time_scope)
+        return _augment_targeting_payload(_apply_temporal_fields({"intent": "create_task", "task_name": "esto"}, due_hint, time_scope))
 
     match = re.search(rf"^(?:dej(?:a|á)|{create_followup_prefix})\s+follow-?up(?:\s+para\s+(.+))?$", stripped_normalized)
     if match:
-        return _apply_temporal_fields({
+        return _augment_targeting_payload(_apply_temporal_fields({
             "intent": "create_followup",
             "task_name": match.group(1).strip() if match and match.group(1) else None,
             "new_priority": priority,
-        }, due_hint, time_scope)
+        }, due_hint, time_scope))
 
     match = re.search(r"(?:sum(?:a|á)|agreg(?:a|á)|dej(?:a|á))\s+una?\s*nota\s+al\s+proyecto(?:\s+(.+?))?\s*:\s*(.+)$", normalized)
     if match:
@@ -186,6 +208,7 @@ def _parse_creation_intents(normalized: str) -> dict | None:
             "intent": "add_project_note",
             "project_name": project_name,
             "last_note": match.group(2).strip(),
+            "expected_scope": "project",
         }
 
     match = re.search(r"^(?:sum(?:a|á)|agreg(?:a|á)|dej(?:a|á))\s+una?\s*nota\s+al\s+proyecto(?:\s+(.+))?$", normalized)
@@ -195,6 +218,7 @@ def _parse_creation_intents(normalized: str) -> dict | None:
             "intent": "add_project_note",
             "project_name": project_name,
             "last_note": None,
+            "expected_scope": "project",
         }
 
     match = re.search(r"^dej(?:a|á)\s+nota\s*:\s*(.+)$", normalized)
@@ -297,43 +321,192 @@ def _apply_temporal_fields(payload: dict, due_hint: str | None, time_scope: str 
     return payload
 
 
+def _augment_targeting_payload(payload: dict) -> dict:
+    expected_scope = payload.get("expected_scope")
+    raw_value = None
+    if expected_scope == "task":
+        raw_value = payload.get("task_name")
+    elif expected_scope == "project":
+        raw_value = payload.get("project_name") or payload.get("entity_hint")
+    elif expected_scope == "client":
+        raw_value = payload.get("client_name") or payload.get("entity_hint")
+    else:
+        raw_value = payload.get("entity_hint") or payload.get("project_name") or payload.get("task_name") or payload.get("client_name")
+
+    raw_lower = (raw_value or "").lower()
+    cleaned_value = _clean_target_phrase(raw_value)
+    if cleaned_value:
+        if expected_scope == "task" and payload.get("task_name"):
+            payload["task_name"] = cleaned_value
+        elif expected_scope == "project" and payload.get("project_name"):
+            payload["project_name"] = cleaned_value
+        elif expected_scope == "client" and payload.get("client_name"):
+            payload["client_name"] = cleaned_value
+        elif payload.get("entity_hint"):
+            payload["entity_hint"] = cleaned_value
+
+    if cleaned_value and "secondary_descriptor" not in payload:
+        tokens = cleaned_value.split()
+        if len(tokens) >= 2:
+            payload["secondary_descriptor"] = " ".join(tokens[1:])
+            if "entity_hint" not in payload and expected_scope in {"project", "task"}:
+                payload["entity_hint"] = tokens[0]
+
+    if "no el otro" in raw_lower or "no ese" in raw_lower:
+        payload["contrast_hint"] = "exclude_other"
+
+    return payload
+
+
+def _clean_target_phrase(raw_value: str | None) -> str | None:
+    if not raw_value:
+        return None
+    cleaned = raw_value.strip(" ,.?:;")
+    cleaned = re.sub(r"^(?:el|la)\s+proyecto\s+de\s+", "", cleaned).strip()
+    cleaned = re.sub(r"^(?:el|la)\s+tarea\s+de\s+", "", cleaned).strip()
+    cleaned = re.sub(r"^(?:el|la)\s+cliente\s+de\s+", "", cleaned).strip()
+    cleaned = re.sub(r",?\s*no\s+el\s+otro$", "", cleaned).strip()
+    cleaned = re.sub(r",?\s*no\s+ese$", "", cleaned).strip()
+    return cleaned or None
+
+
 def _parse_ambiguity_intents(normalized: str) -> dict | None:
     if not normalized:
         return None
 
+    if normalized in {"no el otro", "no ese"}:
+        return {
+            "intent": "clarify_entity_reference",
+            "use_previous_candidates": True,
+            "contrast_hint": "exclude_other",
+        }
+
+    words = [token for token in normalized.replace("?", "").split() if token]
+    if normalized.startswith("en ") and 1 < len(words) <= 4:
+        return _augment_targeting_payload(
+            {
+                "intent": "clarify_entity_reference",
+                "entity_hint": normalized.removeprefix("en ").strip(),
+                "use_previous_candidates": True,
+            }
+        )
+
+    if (
+        normalized.startswith(("el ", "la "))
+        and 1 < len(words) <= 3
+        and not normalized.startswith(("el proyecto", "la tarea", "el cliente"))
+    ):
+        candidate_hint = normalized.removeprefix("el ").removeprefix("la ").strip()
+        return _augment_targeting_payload(
+            {
+                "intent": "clarify_entity_reference",
+                "entity_hint": candidate_hint,
+                "secondary_descriptor": candidate_hint,
+                "use_previous_candidates": True,
+            }
+        )
+
+    match = re.search(r"^(?:el|la)\s+de\s+(.+)$", normalized)
+    if match:
+        return {
+            "intent": "clarify_entity_reference",
+            "entity_hint": match.group(1).strip(),
+            "secondary_descriptor": match.group(1).strip(),
+            "use_previous_candidates": True,
+        }
+
     match = re.search(r"^resumime\s+lo\s+(?:del|de la|de)\s+(.+)$", normalized)
     if match:
-        return {"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()}
+        return _augment_targeting_payload({"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()})
 
     match = re.search(r"^lo\s+(?:del|de la|de)\s+(.+)$", normalized)
     if match:
-        return {"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()}
+        return _augment_targeting_payload({"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()})
 
     match = re.search(r"^que\s+pasa\s+con\s+(.+)$", normalized)
     if match:
-        return {"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()}
+        return _augment_targeting_payload({"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()})
 
     match = re.search(r"^quiero\s+ver\s+(.+)$", normalized)
     if match:
-        return {"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()}
+        return _augment_targeting_payload({"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()})
 
     match = re.search(r"^actualiza\s+(.+)$", normalized)
     if match:
-        return {"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()}
+        if normalized.startswith(("actualiza la tarea ", "actualiza el proyecto ", "actualiza el cliente ")):
+            return None
+        return _augment_targeting_payload({"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()})
 
     match = re.search(r"^quiero\s+avanzar\s+con\s+(.+)$", normalized)
     if match:
-        return {"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()}
+        return _augment_targeting_payload({"intent": "clarify_entity_reference", "entity_hint": match.group(1).strip()})
 
     words = [token for token in normalized.replace("?", "").split() if token]
     if len(words) <= 2 and normalized not in {"cerrala", "cerralo"}:
         if normalized in OPEN_ENTITY_TERMS or (len(words) == 1 and len(words[0]) >= 3):
-            return {"intent": "clarify_entity_reference", "entity_hint": normalized}
+            return _augment_targeting_payload({"intent": "clarify_entity_reference", "entity_hint": normalized})
 
     return None
 
 
 def _parse_read_intents(normalized: str) -> dict | None:
+    if any(phrase in normalized for phrase in ["proyectos activos", "mis proyectos activos", "que proyectos tengo activos"]):
+        return {"intent": "get_active_projects"}
+
+    if any(phrase in normalized for phrase in ["que hiciste recien", "que hiciste recién"]):
+        return {"intent": "get_audit_trace_summary", "audit_focus": "recent"}
+
+    if "que resolviste" in normalized:
+        return {"intent": "get_audit_trace_summary", "audit_focus": "resolution"}
+
+    if any(phrase in normalized for phrase in ["por que elegiste esa", "por qué elegiste esa"]):
+        return {"intent": "get_audit_trace_summary", "audit_focus": "decision_reason"}
+
+    if "que quedo bloqueado por seguridad" in normalized:
+        return {"intent": "get_audit_trace_summary", "audit_focus": "blocked"}
+
+    if "que parte entendiste" in normalized:
+        return {"intent": "get_audit_trace_summary", "audit_focus": "understood"}
+
+    if "que accion ejecutaste" in normalized:
+        return {"intent": "get_audit_trace_summary", "audit_focus": "action"}
+
+    match = re.search(r"^(?:resumime|comentame|comentáme)\s+el\s+proyecto\s+de\s+(.+?)\s+de\s+(.+)$", normalized)
+    if match:
+        return _augment_targeting_payload(
+            {
+                "intent": "get_operational_summary",
+                "project_name": match.group(1).strip(),
+                "client_name": match.group(2).strip(),
+                "expected_scope": "project",
+            }
+        )
+
+    match = re.search(r"^que\s+me\s+preocuparia\s+del\s+proyecto\s+de\s+(.+?)\s+de\s+(.+)$", normalized)
+    if match:
+        return _augment_targeting_payload(
+            {
+                "intent": "get_operational_friction_summary",
+                "project_name": match.group(1).strip(),
+                "client_name": match.group(2).strip(),
+                "expected_scope": "project",
+            }
+        )
+
+    match = re.search(r"^quiero\s+ver\s+el\s+(.+?)\s+de\s+(.+)$", normalized)
+    if match:
+        return _augment_targeting_payload(
+            {
+                "intent": "clarify_entity_reference",
+                "entity_hint": match.group(1).strip(),
+                "client_name": match.group(2).strip(),
+            }
+        )
+
+    match = re.search(r"^resumime\s+el\s+(.+)$", normalized)
+    if match:
+        return _augment_targeting_payload({"intent": "get_operational_summary", "entity_hint": match.group(1).strip()})
+
     if any(
         phrase in normalized
         for phrase in [
@@ -493,6 +666,10 @@ def _parse_read_intents(normalized: str) -> dict | None:
     ):
         return {"intent": "get_operational_recommendation", "client_name": "este cliente"}
 
+    match = re.search(r"^(?:que harias ahora con|qué harías ahora con)\s+(.+)$", normalized)
+    if match:
+        return {"intent": "get_operational_recommendation", "entity_hint": match.group(1).strip()}
+
     if any(
         phrase in normalized
         for phrase in [
@@ -511,6 +688,8 @@ def _parse_read_intents(normalized: str) -> dict | None:
             "que me recomendas hacer con ",
             "quÃ© me recomendÃ¡s hacer con ",
             "que haria ahora con ",
+            "que harias ahora con ",
+            "qué harías ahora con ",
             "quÃ© harÃ­as ahora con ",
         ]
     ):
@@ -544,6 +723,17 @@ def _parse_read_intents(normalized: str) -> dict | None:
             "si tuvieras que elegir una sola cosa",
             "si tuvieras que elegir una sola cosa, cual seria",
             "si tuvieras que elegir una sola cosa, cuÃ¡l serÃ­a",
+        ]
+    ):
+        return {"intent": "get_operational_recommendation", "recommendation_focus": "general"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que harias primero",
+            "qué harías primero",
+            "si tuvieras que elegir una sola tarea, cual seria",
+            "si tuvieras que elegir una sola tarea, cuál sería",
         ]
     ):
         return {"intent": "get_operational_recommendation", "recommendation_focus": "general"}
@@ -594,6 +784,9 @@ def _parse_read_intents(normalized: str) -> dict | None:
             return {"intent": "get_operational_friction_summary", "project_name": "este proyecto"} if "este proyecto" in normalized else {"intent": "get_operational_friction_summary"}
         if "y que esta frenado" in normalized or "y qué está frenado" in normalized:
             return {"intent": "get_operational_friction_summary", "entity_hint": "aca"}
+        return {"intent": "get_operational_friction_summary"}
+
+    if any(phrase in normalized for phrase in ["que me viene estancando", "qué me viene estancando"]):
         return {"intent": "get_operational_friction_summary"}
 
     if any(
@@ -992,6 +1185,17 @@ def _parse_read_intents(normalized: str) -> dict | None:
 
 def _parse_task_update_intents(normalized: str) -> dict | None:
     contextual_payload = _extract_contextual_scope(normalized)
+
+    match = re.search(r"^actualiza\s+la\s+tarea\s+de\s+(.+?)\s+del\s+(.+)$", normalized)
+    if match:
+        return _augment_targeting_payload(
+            {
+                "intent": "clarify_entity_reference",
+                "task_name": match.group(1).strip(),
+                "project_name": match.group(2).strip(),
+                "expected_scope": "task",
+            }
+        )
 
     match = re.search(r"(?:ponelo|ponela)\s+en\s+(alta|media|baja)$", normalized)
     if match:

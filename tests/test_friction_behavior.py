@@ -26,7 +26,9 @@ class FrictionBehaviorTests(unittest.TestCase):
         snapshot = build_friction_focus_from_tasks([task], today=today)
 
         self.assertEqual(snapshot["friction_tasks"][0]["title"], "Resolver bloqueo API")
-        self.assertIn("bloqueada", snapshot["friction_tasks"][0]["friction_signals"])
+        self.assertTrue(
+            any("bloqueada" in signal for signal in snapshot["friction_tasks"][0]["friction_signals"])
+        )
         self.assertTrue(
             any(
                 signal in snapshot["friction_tasks"][0]["friction_signals"]

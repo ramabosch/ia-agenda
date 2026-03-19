@@ -34,11 +34,22 @@ def create_task(
 
 
 def get_tasks_by_project(db: Session, project_id: int) -> list[Task]:
-    return db.query(Task).filter(Task.project_id == project_id).order_by(Task.id.desc()).all()
+    return (
+        db.query(Task)
+        .options(joinedload(Task.project).joinedload(Project.client))
+        .filter(Task.project_id == project_id)
+        .order_by(Task.id.desc())
+        .all()
+    )
 
 
 def get_all_tasks(db: Session) -> list[Task]:
-    return db.query(Task).order_by(Task.id.desc()).all()
+    return (
+        db.query(Task)
+        .options(joinedload(Task.project).joinedload(Project.client))
+        .order_by(Task.id.desc())
+        .all()
+    )
 
 
 def get_all_tasks_with_relations(db: Session) -> list[Task]:
@@ -51,12 +62,19 @@ def get_all_tasks_with_relations(db: Session) -> list[Task]:
 
 
 def get_tasks_by_status(db: Session, status: str) -> list[Task]:
-    return db.query(Task).filter(Task.status == status).order_by(Task.id.desc()).all()
+    return (
+        db.query(Task)
+        .options(joinedload(Task.project).joinedload(Project.client))
+        .filter(Task.status == status)
+        .order_by(Task.id.desc())
+        .all()
+    )
 
 
 def get_overdue_tasks(db: Session, today: date) -> list[Task]:
     return (
         db.query(Task)
+        .options(joinedload(Task.project).joinedload(Project.client))
         .filter(Task.due_date.is_not(None))
         .filter(Task.due_date < today)
         .filter(Task.status != "hecha")
@@ -68,6 +86,7 @@ def get_overdue_tasks(db: Session, today: date) -> list[Task]:
 def get_tasks_due_today(db: Session, today: date) -> list[Task]:
     return (
         db.query(Task)
+        .options(joinedload(Task.project).joinedload(Project.client))
         .filter(Task.due_date == today)
         .filter(Task.status != "hecha")
         .order_by(Task.id.desc())
@@ -89,7 +108,12 @@ def update_task_status(db: Session, task_id: int, new_status: str) -> Task | Non
 
 
 def get_task_by_id(db: Session, task_id: int) -> Task | None:
-    return db.query(Task).filter(Task.id == task_id).first()
+    return (
+        db.query(Task)
+        .options(joinedload(Task.project).joinedload(Project.client), joinedload(Task.updates))
+        .filter(Task.id == task_id)
+        .first()
+    )
 
 
 def update_task_context(

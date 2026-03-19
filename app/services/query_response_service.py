@@ -204,6 +204,18 @@ def build_response_from_query(
             conversation_context=conversation_context,
         )
 
+    if intent == "get_active_projects":
+        projects = [project for project in get_all_projects() if getattr(project, "status", None) == "activo"]
+        parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
+        if not projects:
+            return "No encontre proyectos activos en este momento."
+
+        lines = ["Estos son los proyectos activos que veo hoy:"]
+        for project in projects[:10]:
+            client_name = getattr(getattr(project, "client", None), "name", None) or "Desconocido"
+            lines.append(f"- {project.name} | Cliente: {client_name} | Estado: {project.status}")
+        return "\n".join(lines)
+
     if intent == "get_active_clients":
         clients = get_active_clients()
         parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
@@ -3044,27 +3056,45 @@ def _scope_label(scope: str) -> str:
 
 
 def _append_operational_sections(lines: list[str], advanced_summary: dict) -> None:
-    if advanced_summary.get("important_pending"):
+    important_pending = _dedupe_operational_items(advanced_summary.get("important_pending") or [])
+    risk_items = _dedupe_operational_items(
+        advanced_summary.get("risk_items") or [],
+        seen=_operational_seen_keys(important_pending),
+    )
+    attention_items = _dedupe_operational_items(
+        advanced_summary.get("attention_items") or [],
+        seen=_operational_seen_keys(important_pending + risk_items),
+    )
+    next_steps = _dedupe_operational_items(
+        advanced_summary.get("next_steps") or [],
+        seen=_operational_seen_keys(important_pending + risk_items + attention_items),
+    )
+
+    if important_pending:
         lines.append("Pendientes importantes:")
-        for item in advanced_summary["important_pending"][:3]:
+        for item in important_pending[:3]:
             lines.append(_format_operational_item(item))
 
-    if advanced_summary.get("risk_items"):
+    if risk_items:
         lines.append("Bloqueos o riesgos:")
-        for item in advanced_summary["risk_items"][:3]:
+        for item in risk_items[:3]:
             lines.append(_format_operational_item(item))
+    elif advanced_summary.get("risk_items"):
+        lines.append("Bloqueos o riesgos: ya quedaron integrados arriba en las tareas destacadas.")
 
-    attention_items = advanced_summary.get("attention_items") or []
     if attention_items:
         lines.append("Merece atencion:")
         for item in attention_items[:3]:
             lines.append(_format_operational_item(item))
+    elif advanced_summary.get("attention_items"):
+        lines.append("Merece atencion: ya quedo sintetizado arriba para evitar repeticion.")
 
-    next_steps = advanced_summary.get("next_steps") or []
     if next_steps:
         lines.append("Proximos pasos relevantes:")
         for item in next_steps[:3]:
             lines.append(_format_operational_item(item))
+    elif advanced_summary.get("next_steps"):
+        lines.append("Proximos pasos relevantes: ya quedaron integrados arriba en las tareas destacadas.")
     else:
         lines.append("Proximos pasos relevantes: no veo un proximo paso explicito en los datos actuales.")
 
@@ -3209,6 +3239,33 @@ def _format_operational_item(item) -> str:
     elif item.get("missing_next_action"):
         line += " | Sin proxima accion definida"
     return line
+
+
+def _operational_item_key(item) -> tuple:
+    if isinstance(item, str):
+        return ("text", item)
+    return (
+        item.get("task_id"),
+        item.get("title"),
+        item.get("project_name"),
+        item.get("client_name"),
+    )
+
+
+def _operational_seen_keys(items: list) -> set[tuple]:
+    return {_operational_item_key(item) for item in items}
+
+
+def _dedupe_operational_items(items: list, *, seen: set[tuple] | None = None) -> list:
+    seen_keys = set(seen or set())
+    deduped = []
+    for item in items:
+        key = _operational_item_key(item)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def _format_friction_item(item) -> str:
@@ -3447,11 +3504,16 @@ def _abort_with_context(parsed_query: dict, message: str) -> str:
 
 
 def _attach_operational_summary_debug(parsed_query: dict, advanced_summary: dict, scope_override: str | None = None) -> None:
+    important_pending = _dedupe_operational_items(advanced_summary.get("important_pending", []))
+    risk_items = _dedupe_operational_items(advanced_summary.get("risk_items", []), seen=_operational_seen_keys(important_pending))
+    attention_items = _dedupe_operational_items(advanced_summary.get("attention_items", []), seen=_operational_seen_keys(important_pending + risk_items))
+    next_steps = _dedupe_operational_items(advanced_summary.get("next_steps", []), seen=_operational_seen_keys(important_pending + risk_items + attention_items))
+
     parsed_query["_summary_scope"] = scope_override or advanced_summary.get("scope")
     parsed_query["_summary_heuristic"] = advanced_summary.get("heuristic", [])
-    parsed_query["_summary_highlights"] = [_debug_summary_item(item) for item in advanced_summary.get("important_pending", [])[:3]]
-    parsed_query["_summary_blockers"] = [_debug_summary_item(item) for item in advanced_summary.get("risk_items", [])[:3]]
-    parsed_query["_summary_next_steps"] = [_debug_summary_item(item) for item in advanced_summary.get("next_steps", [])[:3]]
+    parsed_query["_summary_highlights"] = [_debug_summary_item(item) for item in important_pending[:3]]
+    parsed_query["_summary_blockers"] = [_debug_summary_item(item) for item in risk_items[:3]]
+    parsed_query["_summary_next_steps"] = [_debug_summary_item(item) for item in next_steps[:3]]
     parsed_query["_summary_recommendation"] = advanced_summary.get("recommendation")
     _store_response_snapshot(
         parsed_query,
@@ -3460,11 +3522,11 @@ def _attach_operational_summary_debug(parsed_query: dict, advanced_summary: dict
             "scope": scope_override or advanced_summary.get("scope"),
             "entity_name": advanced_summary.get("entity_name"),
             "status_overview": advanced_summary.get("status_overview"),
-            "highlights": advanced_summary.get("important_pending", [])[:3],
-            "blockers": advanced_summary.get("risk_items", [])[:3],
-            "next_steps": advanced_summary.get("next_steps", [])[:3],
+            "highlights": important_pending[:3],
+            "blockers": risk_items[:3],
+            "next_steps": next_steps[:3],
             "recommendation": advanced_summary.get("recommendation"),
-            "items": advanced_summary.get("attention_items", [])[:3],
+            "items": attention_items[:3],
         },
     )
 

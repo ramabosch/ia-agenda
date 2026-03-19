@@ -36,11 +36,21 @@ def get_all_projects_with_tasks(db: Session) -> list[Project]:
 
 
 def get_project_by_id(db: Session, project_id: int) -> Project | None:
-    return db.query(Project).filter(Project.id == project_id).first()
+    return (
+        db.query(Project)
+        .options(joinedload(Project.client))
+        .filter(Project.id == project_id)
+        .first()
+    )
 
 
 def update_project_description(db: Session, project_id: int, description: str | None) -> Project | None:
-    project = db.query(Project).filter(Project.id == project_id).first()
+    project = (
+        db.query(Project)
+        .options(joinedload(Project.client))
+        .filter(Project.id == project_id)
+        .first()
+    )
     if not project:
         return None
 
@@ -71,6 +81,7 @@ def get_project_by_name_and_client(db: Session, name: str, client_id: int):
     search = f"%{name.strip()}%"
     return (
         db.query(Project)
+        .options(joinedload(Project.client))
         .filter(Project.client_id == client_id)
         .filter(Project.name.ilike(search))
         .order_by(Project.name.asc())
@@ -82,6 +93,7 @@ def get_project_by_name(db: Session, name: str):
     search = f"%{name.strip()}%"
     return (
         db.query(Project)
+        .options(joinedload(Project.client))
         .filter(Project.name.ilike(search))
         .order_by(Project.name.asc())
         .first()
@@ -91,6 +103,7 @@ def search_projects_by_name(db: Session, name: str, limit: int = 5):
     search = f"%{name.strip()}%"
     return (
         db.query(Project)
+        .options(joinedload(Project.client))
         .filter(Project.name.ilike(search))
         .order_by(Project.created_at.desc())
         .limit(limit)
@@ -102,6 +115,7 @@ def search_projects_by_name_and_client_id(db: Session, name: str, client_id: int
     search = f"%{name.strip()}%"
     return (
         db.query(Project)
+        .options(joinedload(Project.client))
         .filter(Project.client_id == client_id)
         .filter(Project.name.ilike(search))
         .order_by(Project.created_at.desc())

@@ -50,24 +50,35 @@ class ParserBehaviorTests(unittest.TestCase):
 
     def test_parse_operational_friction_queries(self):
         stalled = parse_user_query("que viene estancado")
+        real_stalled = parse_user_query("que me viene estancando")
         risky_client = parse_user_query("que me preocuparia de Cam")
         contextual = parse_user_query("y que esta frenado?")
         self.assertEqual(stalled["intent"], "get_operational_friction_summary")
+        self.assertEqual(real_stalled["intent"], "get_operational_friction_summary")
         self.assertEqual(risky_client["intent"], "get_operational_friction_summary")
         self.assertEqual(risky_client["entity_hint"], "cam")
         self.assertEqual(contextual["intent"], "get_operational_friction_summary")
 
     def test_parse_operational_recommendation_queries(self):
         client = parse_user_query("que me recomendas hacer con Cam")
+        real_client = parse_user_query("que harias ahora con Cam")
         first = parse_user_query("que atacaria primero")
+        choose_one = parse_user_query("si tuvieras que elegir una sola tarea, cual seria")
         close = parse_user_query("que conviene cerrar hoy")
         contextual = parse_user_query("que priorizarias en este proyecto")
         self.assertEqual(client["intent"], "get_operational_recommendation")
         self.assertEqual(client["entity_hint"], "cam")
+        self.assertEqual(real_client["intent"], "get_operational_recommendation")
+        self.assertEqual(real_client["entity_hint"], "cam")
         self.assertEqual(first["intent"], "get_operational_recommendation")
         self.assertEqual(first["recommendation_focus"], "general")
+        self.assertEqual(choose_one["recommendation_focus"], "general")
         self.assertEqual(close["recommendation_focus"], "close")
         self.assertEqual(contextual["project_name"], "este proyecto")
+
+    def test_parse_active_projects_query(self):
+        parsed = parse_user_query("proyectos activos")
+        self.assertEqual(parsed["intent"], "get_active_projects")
 
     def test_parse_conversational_drilldown_queries(self):
         why = parse_user_query("por que esa")
@@ -178,6 +189,52 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(urgent_and_overdue["subqueries"][1]["intent"], "get_overdue_tasks_summary")
         self.assertEqual(summary_and_followup["subqueries"][1]["intent"], "get_next_actions_summary")
         self.assertEqual(client_facing["subqueries"][1]["intent"], "get_client_facing_summary")
+
+    def test_parse_fine_targeting_queries(self):
+        summary = parse_user_query("resumime el dashboard de ventas, no el otro")
+        friction = parse_user_query("que me preocuparia del proyecto de automatizacion de Cam")
+        create_task = parse_user_query("agrega una tarea al proyecto de dashboard comercial")
+        project_summary = parse_user_query("comentame el proyecto de onboarding de Cam")
+        followup_choice = parse_user_query("el de ventas")
+        in_project_choice = parse_user_query("en dashboard comercial")
+        short_choice = parse_user_query("el comercial")
+
+        self.assertEqual(summary["intent"], "get_operational_summary")
+        self.assertEqual(summary["entity_hint"], "dashboard de ventas")
+        self.assertEqual(summary["secondary_descriptor"], "de ventas")
+        self.assertEqual(summary["contrast_hint"], "exclude_other")
+        self.assertEqual(friction["intent"], "get_operational_friction_summary")
+        self.assertEqual(friction["project_name"], "automatizacion")
+        self.assertEqual(friction["client_name"], "cam")
+        self.assertEqual(friction["expected_scope"], "project")
+        self.assertEqual(create_task["intent"], "create_task")
+        self.assertEqual(create_task["project_name"], "dashboard comercial")
+        self.assertEqual(create_task["expected_scope"], "project")
+        self.assertEqual(project_summary["project_name"], "onboarding")
+        self.assertEqual(project_summary["client_name"], "cam")
+        self.assertEqual(followup_choice["intent"], "clarify_entity_reference")
+        self.assertTrue(followup_choice["use_previous_candidates"])
+        self.assertEqual(in_project_choice["intent"], "clarify_entity_reference")
+        self.assertTrue(in_project_choice["use_previous_candidates"])
+        self.assertEqual(in_project_choice["entity_hint"], "dashboard comercial")
+        self.assertEqual(short_choice["intent"], "clarify_entity_reference")
+        self.assertTrue(short_choice["use_previous_candidates"])
+
+    def test_parse_audit_queries(self):
+        recent = parse_user_query("que hiciste recien")
+        resolution = parse_user_query("que resolviste")
+        reason = parse_user_query("por que elegiste esa")
+        blocked = parse_user_query("que quedo bloqueado por seguridad")
+        understood = parse_user_query("que parte entendiste")
+        action = parse_user_query("que accion ejecutaste")
+
+        self.assertEqual(recent["intent"], "get_audit_trace_summary")
+        self.assertEqual(recent["audit_focus"], "recent")
+        self.assertEqual(resolution["audit_focus"], "resolution")
+        self.assertEqual(reason["audit_focus"], "decision_reason")
+        self.assertEqual(blocked["audit_focus"], "blocked")
+        self.assertEqual(understood["audit_focus"], "understood")
+        self.assertEqual(action["audit_focus"], "action")
 
     def test_parse_contextual_followups(self):
         projects = parse_user_query("y sus proyectos?")

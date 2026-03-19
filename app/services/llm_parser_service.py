@@ -12,6 +12,7 @@ from app.config import (
 )
 
 ALLOWED_INTENTS = {
+    "get_active_projects",
     "get_active_clients",
     "get_open_tasks_by_client_name",
     "get_client_summary",
@@ -78,6 +79,10 @@ EMPTY_PAYLOAD = {
     "next_action": None,
     "last_note": None,
     "entity_hint": None,
+    "expected_scope": None,
+    "secondary_descriptor": None,
+    "contrast_hint": None,
+    "use_previous_candidates": None,
     "recommendation_focus": None,
     "followup_focus": None,
     "filter_mode": None,
@@ -542,6 +547,7 @@ Reglas:
 12. Para notas operativas, usa intent = "add_task_note" y completa last_note.
 
 Intentos permitidos:
+- get_active_projects
 - get_active_clients
 - get_open_tasks_by_client_name
 - get_client_summary

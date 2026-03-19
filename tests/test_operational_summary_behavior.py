@@ -83,6 +83,63 @@ class OperationalSummaryBehaviorTests(unittest.TestCase):
         self.assertIn("resolver indicadores", response.lower())
         self.assertIn("no veo un proximo paso explicito", response.lower())
 
+    def test_operational_summary_reduces_repetition_across_sections(self):
+        client = make_client(1, "CAM")
+        project = make_project(10, "Dashboard", client)
+        repeated = {
+            "task_id": 100,
+            "title": "Resolver indicadores",
+            "project_name": "Dashboard",
+            "client_name": "CAM",
+            "is_blocked": True,
+            "is_high_priority": True,
+            "missing_next_action": True,
+            "has_next_action": False,
+            "next_action": None,
+        }
+        advanced = {
+            "scope": "project",
+            "entity_name": "Dashboard",
+            "status_overview": "Hay 1 tarea abierta en este proyecto.",
+            "important_pending": [repeated],
+            "risk_items": [repeated],
+            "attention_items": [repeated],
+            "next_steps": [repeated],
+            "recommendation": "Primero destrabaria 'Resolver indicadores'.",
+            "heuristic": ["bloqueadas arriba"],
+        }
+        summary = {
+            "project_id": 10,
+            "project_name": "Dashboard",
+            "client_id": 1,
+            "client_name": "CAM",
+            "status": "activo",
+            "description": None,
+            "total_tasks": 1,
+            "open_tasks": 1,
+            "done_tasks": 0,
+            "blocked_tasks": 1,
+            "in_progress_tasks": 0,
+        }
+
+        with patch("app.services.reference_resolver.get_all_projects", return_value=[project]), patch(
+            "app.services.reference_resolver.get_all_tasks",
+            return_value=[],
+        ), patch(
+            "app.services.reference_resolver.get_all_clients",
+            return_value=[],
+        ), patch(
+            "app.services.query_response_service.get_project_operational_summary",
+            return_value=summary,
+        ), patch(
+            "app.services.query_response_service.get_project_advanced_summary",
+            return_value=advanced,
+        ):
+            parsed = parse_user_query("como viene dashboard")
+            response = build_response_from_query(parsed, user_query="como viene dashboard", conversation_context={})
+
+        self.assertLessEqual(response.lower().count("resolver indicadores"), 3)
+
     def test_task_operational_summary_uses_explicit_next_action_when_present(self):
         client = make_client(1, "CAM")
         project = make_project(10, "Dashboard", client)

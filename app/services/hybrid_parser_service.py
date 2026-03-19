@@ -3,6 +3,7 @@ from app.services.llm_parser_service import parse_query_with_llm
 from app.services.query_parser_service import parse_user_query as parse_user_query_rules
 
 EXECUTIVE_INTENTS = {
+    "get_active_projects",
     "get_blocked_items_summary",
     "get_today_priority_summary",
     "get_overdue_or_stuck_summary",
@@ -27,6 +28,10 @@ EXECUTIVE_INTENTS = {
 
 CLARIFICATION_INTENTS = {
     "clarify_entity_reference",
+}
+
+AUDIT_INTENTS = {
+    "get_audit_trace_summary",
 }
 
 SUMMARY_INTENTS = {
@@ -70,6 +75,8 @@ def _should_prefer_rules(query: str, rules_result: dict, llm_result: dict | None
         if rules_intent in EXECUTIVE_INTENTS:
             return True
         if rules_intent in CLARIFICATION_INTENTS:
+            return True
+        if rules_intent in AUDIT_INTENTS:
             return True
         if rules_intent in SUMMARY_INTENTS:
             return True
