@@ -1,6 +1,10 @@
 from app.db.session import SessionLocal
 from app.repositories import project_repository
-from app.services.task_service import build_friction_focus_from_tasks, build_operational_focus_from_tasks
+from app.services.task_service import (
+    build_friction_focus_from_tasks,
+    build_operational_focus_from_tasks,
+    build_recommendation_focus_from_tasks,
+)
 
 
 def create_project(client_id: int, name: str, description: str | None = None):
@@ -294,5 +298,47 @@ def get_operational_friction_project_snapshot() -> dict:
             "mas tareas estancadas primero",
             "despues mas bloqueadas",
             "despues falta de next_action y acumulacion abierta",
+        ],
+    }
+
+
+def get_operational_recommendation_project_snapshot(focus: str = "general") -> dict:
+    projects = get_all_projects_with_tasks()
+    items = []
+
+    for project in projects:
+        recommendation = build_recommendation_focus_from_tasks(project.tasks, focus=focus)
+        open_tasks = len(recommendation["open_tasks"])
+        top_items = recommendation["recommendations"]
+        top_score = top_items[0]["recommendation_score"] if top_items else 0
+        missing_next_action = len([item for item in recommendation["open_tasks"] if item["missing_next_action"]])
+        blocked_tasks = len([item for item in recommendation["open_tasks"] if item["is_blocked"]])
+
+        items.append(
+            {
+                "project_id": project.id,
+                "project_name": project.name,
+                "client_id": project.client.id if project.client else None,
+                "client_name": project.client.name if project.client else "Desconocido",
+                "open_tasks": open_tasks,
+                "blocked_tasks": blocked_tasks,
+                "without_next_action": missing_next_action,
+                "top_recommendation": top_items[0]["title"] if top_items else None,
+                "score": top_score + blocked_tasks * 5 + missing_next_action * 3 + open_tasks,
+            }
+        )
+
+    ranked = sorted(
+        [item for item in items if item["open_tasks"] > 0 and item["score"] > 0],
+        key=lambda item: (-item["score"], item["project_name"]),
+    )
+
+    return {
+        "projects": items,
+        "prioritized_projects": ranked[:5],
+        "heuristic": [
+            "proyectos con una recomendacion mas fuerte primero",
+            "despues mas bloqueadas y falta de seguimiento",
+            "despues acumulacion abierta",
         ],
     }

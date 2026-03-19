@@ -57,6 +57,18 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(risky_client["entity_hint"], "cam")
         self.assertEqual(contextual["intent"], "get_operational_friction_summary")
 
+    def test_parse_operational_recommendation_queries(self):
+        client = parse_user_query("que me recomendas hacer con Cam")
+        first = parse_user_query("que atacaria primero")
+        close = parse_user_query("que conviene cerrar hoy")
+        contextual = parse_user_query("que priorizarias en este proyecto")
+        self.assertEqual(client["intent"], "get_operational_recommendation")
+        self.assertEqual(client["entity_hint"], "cam")
+        self.assertEqual(first["intent"], "get_operational_recommendation")
+        self.assertEqual(first["recommendation_focus"], "general")
+        self.assertEqual(close["recommendation_focus"], "close")
+        self.assertEqual(contextual["project_name"], "este proyecto")
+
     def test_parse_contextual_followups(self):
         projects = parse_user_query("y sus proyectos?")
         close_task = parse_user_query("cerrala")

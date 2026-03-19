@@ -13,11 +13,17 @@ def create_project(db: Session, client_id: int, name: str, description: str | No
 
 
 def get_projects_by_client(db: Session, client_id: int) -> list[Project]:
-    return db.query(Project).filter(Project.client_id == client_id).order_by(Project.id.desc()).all()
+    return (
+        db.query(Project)
+        .options(joinedload(Project.client))
+        .filter(Project.client_id == client_id)
+        .order_by(Project.id.desc())
+        .all()
+    )
 
 
 def get_all_projects(db: Session) -> list[Project]:
-    return db.query(Project).order_by(Project.id.desc()).all()
+    return db.query(Project).options(joinedload(Project.client)).order_by(Project.id.desc()).all()
 
 
 def get_all_projects_with_tasks(db: Session) -> list[Project]:
@@ -33,11 +39,17 @@ def get_project_by_id(db: Session, project_id: int) -> Project | None:
     return db.query(Project).filter(Project.id == project_id).first()
 
 def get_project_with_tasks(db: Session, project_id: int) -> Project | None:
-    return db.query(Project).filter(Project.id == project_id).first()
+    return (
+        db.query(Project)
+        .options(joinedload(Project.client), joinedload(Project.tasks))
+        .filter(Project.id == project_id)
+        .first()
+    )
 
 def get_projects_by_client_id(db: Session, client_id: int):
     return (
         db.query(Project)
+        .options(joinedload(Project.client))
         .filter(Project.client_id == client_id)
         .order_by(Project.created_at.desc())
         .all()

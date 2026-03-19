@@ -90,27 +90,36 @@ def resolve_references(
     is_update_request = _is_update_intent(parsed_query.get("intent"))
     has_explicit_target = _has_concrete_target(parsed_query)
     missing_safe_context = follow_up_mode and _query_requires_context(user_query) and not context and not has_explicit_target
+    client_raw_reference = _raw_reference_for_scope(parsed_query, "client", entity_hint, context)
+    project_raw_reference = _raw_reference_for_scope(parsed_query, "project", entity_hint, context)
+    task_raw_reference = _raw_reference_for_scope(parsed_query, "task", entity_hint, context)
 
     client_result = _resolve_client_reference(
-        _raw_reference_for_scope(parsed_query, "client", entity_hint, context),
+        client_raw_reference,
         user_query=user_query,
         context=context,
         follow_up_mode=follow_up_mode,
         is_update_request=is_update_request,
     )
+
+    if client_result["resolved"] is None and client_raw_reference and _looks_like_context_reference(client_raw_reference, "client") and context.get("client"):
+        client_result = _build_context_result("client", context["client"])
 
     if client_result["resolved"] is None and follow_up_mode and context.get("client"):
         client_result = _build_context_result("client", context["client"])
 
     client_id = _resolved_id(client_result)
     project_result = _resolve_project_reference(
-        _raw_reference_for_scope(parsed_query, "project", entity_hint, context),
+        project_raw_reference,
         client_id=client_id,
         user_query=user_query,
         context=context,
         follow_up_mode=follow_up_mode,
         is_update_request=is_update_request,
     )
+
+    if project_result["resolved"] is None and project_raw_reference and _looks_like_context_reference(project_raw_reference, "project") and context.get("project"):
+        project_result = _build_context_result("project", context["project"])
 
     if project_result["resolved"] is None and follow_up_mode and context.get("project"):
         project_result = _build_context_result("project", context["project"])
@@ -122,14 +131,17 @@ def resolve_references(
         client_id = project_entity.client.id
 
     task_result = _resolve_task_reference(
-        _raw_reference_for_scope(parsed_query, "task", entity_hint, context),
-        client_id=None if intent in {"clarify_entity_reference", "get_operational_summary", "get_operational_friction_summary"} else client_id,
-        project_id=None if intent in {"clarify_entity_reference", "get_operational_summary", "get_operational_friction_summary"} else project_id,
+        task_raw_reference,
+        client_id=None if intent in {"clarify_entity_reference", "get_operational_summary", "get_operational_friction_summary", "get_operational_recommendation"} else client_id,
+        project_id=None if intent in {"clarify_entity_reference", "get_operational_summary", "get_operational_friction_summary", "get_operational_recommendation"} else project_id,
         user_query=user_query,
         context=context,
         follow_up_mode=follow_up_mode,
         is_update_request=is_update_request,
     )
+
+    if task_result["resolved"] is None and task_raw_reference and _looks_like_context_reference(task_raw_reference, "task") and context.get("task"):
+        task_result = _build_context_result("task", context["task"])
 
     if task_result["resolved"] is None and follow_up_mode and context.get("task") and _query_allows_task_context(user_query):
         task_result = _build_context_result("task", context["task"])
@@ -420,7 +432,7 @@ def _raw_reference_for_scope(
     explicit = parsed_query.get(f"{scope}_name")
     if explicit:
         return explicit
-    if parsed_query.get("intent") in {"clarify_entity_reference", "get_operational_summary", "get_operational_friction_summary"}:
+    if parsed_query.get("intent") in {"clarify_entity_reference", "get_operational_summary", "get_operational_friction_summary", "get_operational_recommendation"}:
         raw_hint = (entity_hint or "").strip().lower()
         normalized_hint = normalize_entity_text(entity_hint) if entity_hint else ""
         if (raw_hint in GENERIC_HINTS or normalized_hint in GENERIC_HINTS) and context.get("scope") == scope and context.get(scope, {}).get("name"):
@@ -658,10 +670,12 @@ def _detect_clarification_need(
     if any(result["ambiguous"] for result in results.values()):
         return True, "ambiguous_matches"
 
-    if intent in {"clarify_entity_reference", "get_operational_summary", "get_operational_friction_summary"}:
+    if intent in {"clarify_entity_reference", "get_operational_summary", "get_operational_friction_summary", "get_operational_recommendation"}:
         raw_hint = (entity_hint or "").strip().lower()
         normalized_hint = normalize_entity_text(entity_hint) if entity_hint else ""
         if intent == "get_operational_friction_summary" and not raw_hint and not normalized_hint and not matched_scopes:
+            return False, None
+        if intent == "get_operational_recommendation" and not raw_hint and not normalized_hint:
             return False, None
         if not normalized_hint and raw_hint not in GENERIC_HINTS:
             return True, "generic_request"

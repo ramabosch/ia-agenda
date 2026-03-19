@@ -7,6 +7,7 @@ from app.services.project_service import (
     get_executive_project_snapshot,
     get_followup_project_snapshot,
     get_operational_friction_project_snapshot,
+    get_operational_recommendation_project_snapshot,
     get_project_advanced_summary,
     get_project_operational_summary,
     get_projects_by_client_id,
@@ -16,12 +17,15 @@ from app.services.task_service import (
     add_task_note_conversational,
     build_client_advanced_summary,
     build_friction_focus_from_tasks,
+    build_recommendation_focus_from_tasks,
     build_task_friction_summary,
+    build_task_recommendation_summary,
     build_task_advanced_summary,
     get_executive_task_snapshot,
     get_followup_task_snapshot,
     get_open_tasks_by_client_id,
     get_operational_friction_snapshot,
+    get_operational_recommendation_snapshot,
     get_task_operational_summary,
     get_tasks_by_client_id,
     get_tasks_by_project_id,
@@ -37,6 +41,7 @@ REFERENCE_AWARE_INTENTS = {
     "clarify_entity_reference",
     "get_operational_summary",
     "get_operational_friction_summary",
+    "get_operational_recommendation",
     "get_open_tasks_by_client_name",
     "get_projects_by_client_name",
     "get_tasks_by_client_name",
@@ -87,6 +92,10 @@ FRICTION_INTENTS = {
     "get_operational_friction_summary",
 }
 
+RECOMMENDATION_INTENTS = {
+    "get_operational_recommendation",
+}
+
 
 def build_response_from_query(
     parsed_query: dict,
@@ -109,6 +118,14 @@ def build_response_from_query(
 
     if intent in FRICTION_INTENTS:
         return _handle_operational_friction_intent(
+            parsed_query,
+            resolved_references,
+            user_query=user_query,
+            conversation_context=conversation_context,
+        )
+
+    if intent in RECOMMENDATION_INTENTS:
+        return _handle_operational_recommendation_intent(
             parsed_query,
             resolved_references,
             user_query=user_query,
@@ -958,6 +975,202 @@ def _build_client_friction_snapshot(task_snapshot: dict) -> dict:
     return {"prioritized_clients": prioritized[:5]}
 
 
+def _handle_operational_recommendation_intent(
+    parsed_query: dict,
+    resolved_references: dict,
+    *,
+    user_query: str | None,
+    conversation_context: dict | None,
+) -> str:
+    context = conversation_context or {}
+    focus = parsed_query.get("recommendation_focus") or _infer_recommendation_focus(user_query)
+    contextual_scope = _preferred_contextual_recommendation_scope(user_query, context)
+    if contextual_scope:
+        contextual_response = _build_contextual_recommendation_response(parsed_query, context, contextual_scope, focus=focus)
+        if contextual_response:
+            return contextual_response
+
+    if resolved_references.get("security_blocked"):
+        return _abort_with_context(
+            parsed_query,
+            "No tengo contexto aislado actual suficiente para recomendar eso con seguridad. Decime el cliente, proyecto o tarea exacta.",
+        )
+
+    if resolved_references.get("clarification_needed") or resolved_references.get("ambiguous"):
+        return _abort_with_context(parsed_query, _build_clarification_response(resolved_references))
+
+    if resolved_references.get("task", {}).get("resolved"):
+        summary = get_task_operational_summary(resolved_references["task"]["resolved"]["id"])
+        if not summary:
+            return _abort_with_context(parsed_query, "Encontre la tarea, pero no pude cargar una recomendacion operativa.")
+        recommendation_summary = build_task_recommendation_summary(summary, focus=focus)
+        _remember_context_from_summary(parsed_query, summary, "task")
+        _attach_recommendation_debug(parsed_query, recommendation_summary, scope_override="task")
+        return _format_task_recommendation_summary(summary, recommendation_summary)
+
+    if resolved_references.get("project", {}).get("resolved"):
+        project = resolved_references["project"]["resolved"]
+        tasks = get_tasks_by_project_id(project["id"])
+        summary = _build_project_recommendation_summary(
+            project_name=project["name"],
+            client_name=resolved_references.get("client", {}).get("resolved", {}).get("name") or "Desconocido",
+            tasks=tasks,
+            focus=focus,
+        )
+        _remember_context(parsed_query, resolved_references, focus_scope="project", tasks=tasks)
+        _attach_recommendation_debug(parsed_query, summary, scope_override="project")
+        return _format_scoped_recommendation_summary(summary)
+
+    if resolved_references.get("client", {}).get("resolved"):
+        client = resolved_references["client"]["resolved"]
+        tasks = get_tasks_by_client_id(client["id"])
+        projects = get_projects_by_client_id(client["id"])
+        summary = _build_client_recommendation_summary(client["name"], projects, tasks, focus=focus)
+        _remember_context(parsed_query, resolved_references, focus_scope="client", projects=projects)
+        _attach_recommendation_debug(parsed_query, summary, scope_override="client")
+        return _format_scoped_recommendation_summary(summary)
+
+    snapshot = get_operational_recommendation_snapshot(focus=focus)
+    project_snapshot = get_operational_recommendation_project_snapshot(focus=focus)
+    client_snapshot = _build_client_recommendation_snapshot(snapshot)
+    parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
+    _attach_recommendation_debug(
+        parsed_query,
+        {
+            "scope": "global",
+            "status_overview": snapshot["status_overview"],
+            "heuristic": snapshot["heuristic"],
+            "recommendations": snapshot["recommendations"],
+            "recommendation": snapshot["recommendation"],
+        },
+        scope_override="global",
+    )
+    return _format_global_recommendation_summary(snapshot, project_snapshot, client_snapshot, focus=focus)
+
+
+def _infer_recommendation_focus(user_query: str | None) -> str:
+    if not user_query:
+        return "general"
+    normalized = user_query.strip().lower()
+    if "destraba" in normalized:
+        return "unblock"
+    if "cerrar hoy" in normalized or "conviene cerrar" in normalized:
+        return "close"
+    return "general"
+
+
+def _preferred_contextual_recommendation_scope(user_query: str | None, context: dict) -> str | None:
+    if not user_query or not context or not context.get("_isolated"):
+        return None
+    normalized = user_query.strip().lower()
+    if not any(
+        marker in normalized
+        for marker in (
+            "que haria ahora",
+            "quÃ© harÃ­as ahora",
+            "que priorizarias aca",
+            "quÃ© priorizarÃ­as acÃ¡",
+            "que priorizarias en este proyecto",
+            "quÃ© priorizarÃ­as en este proyecto",
+            "que priorizarias en ese proyecto",
+            "quÃ© priorizarÃ­as en ese proyecto",
+            "que haria ahora con este cliente",
+            "quÃ© harÃ­as ahora con este cliente",
+            "que deberia priorizar aca",
+            "quÃ© deberÃ­a priorizar acÃ¡",
+            "que atacaria primero",
+            "quÃ© atacarÃ­a primero",
+        )
+    ):
+        return None
+    return context.get("scope")
+
+
+def _build_contextual_recommendation_response(parsed_query: dict, context: dict, scope: str, *, focus: str) -> str | None:
+    if scope == "task" and context.get("task"):
+        summary = get_task_operational_summary(context["task"]["id"])
+        if not summary:
+            return None
+        recommendation_summary = build_task_recommendation_summary(summary, focus=focus)
+        _remember_context_from_summary(parsed_query, summary, "task")
+        _attach_recommendation_debug(parsed_query, recommendation_summary, scope_override="contextual_task")
+        return _format_task_recommendation_summary(summary, recommendation_summary)
+
+    if scope == "project" and context.get("project"):
+        tasks = get_tasks_by_project_id(context["project"]["id"])
+        summary = _build_project_recommendation_summary(
+            project_name=context["project"]["name"],
+            client_name=context.get("client", {}).get("name", "Desconocido"),
+            tasks=tasks,
+            focus=focus,
+        )
+        parsed_query["_conversation_context"] = context
+        _attach_recommendation_debug(parsed_query, summary, scope_override="contextual_project")
+        return _format_scoped_recommendation_summary(summary)
+
+    if scope == "client" and context.get("client"):
+        tasks = get_tasks_by_client_id(context["client"]["id"])
+        projects = get_projects_by_client_id(context["client"]["id"])
+        summary = _build_client_recommendation_summary(context["client"]["name"], projects, tasks, focus=focus)
+        parsed_query["_conversation_context"] = context
+        _attach_recommendation_debug(parsed_query, summary, scope_override="contextual_client")
+        return _format_scoped_recommendation_summary(summary)
+
+    return None
+
+
+def _build_project_recommendation_summary(project_name: str, client_name: str, tasks: list, *, focus: str) -> dict:
+    recommendation = build_recommendation_focus_from_tasks(tasks, focus=focus)
+    open_count = len(recommendation["open_tasks"])
+    return {
+        "scope": "project",
+        "entity_name": project_name,
+        "client_name": client_name,
+        "status_overview": (
+            f"Hay {open_count} tareas abiertas y priorice donde veo mas impacto dentro de este proyecto."
+            if open_count
+            else "No veo tareas abiertas en este proyecto para recomendar."
+        ),
+        "recommendations": recommendation["recommendations"],
+        "heuristic": recommendation["heuristic"],
+        "recommendation": recommendation["recommendation"],
+    }
+
+
+def _build_client_recommendation_summary(client_name: str, projects: list, tasks: list, *, focus: str) -> dict:
+    recommendation = build_recommendation_focus_from_tasks(tasks, focus=focus)
+    open_count = len(recommendation["open_tasks"])
+    return {
+        "scope": "client",
+        "entity_name": client_name,
+        "project_count": len(projects),
+        "status_overview": (
+            f"Hay {len(projects)} proyectos y {open_count} tareas abiertas. Priorice donde veo mas impacto con este cliente."
+            if open_count
+            else f"Hay {len(projects)} proyectos, pero no veo trabajo abierto para recomendar con {client_name}."
+        ),
+        "recommendations": recommendation["recommendations"],
+        "heuristic": recommendation["heuristic"],
+        "recommendation": recommendation["recommendation"],
+    }
+
+
+def _build_client_recommendation_snapshot(task_snapshot: dict) -> dict:
+    clients: dict[int | str, dict] = {}
+    for item in task_snapshot["recommendations"]:
+        client_id = item["client_id"] or item["client_name"]
+        if client_id not in clients:
+            clients[client_id] = {
+                "client_id": item["client_id"],
+                "client_name": item["client_name"],
+                "top_recommendation": item["title"],
+                "score": item["recommendation_score"],
+                "reasons": item["recommendation_reasons"],
+            }
+    ranked = sorted(clients.values(), key=lambda item: (-item["score"], item["client_name"]))
+    return {"prioritized_clients": ranked[:5]}
+
+
 def _format_scoped_followup_list(parsed_query: dict, *, scope: str, scope_name: str, tasks: list) -> str:
     items = _build_followup_items_from_tasks(tasks)
     open_items = [item for item in items if item["status"] != "hecha"]
@@ -1651,6 +1864,52 @@ def _format_global_friction_summary(task_snapshot: dict, project_snapshot: dict,
     return "\n".join(lines)
 
 
+def _format_task_recommendation_summary(summary: dict, recommendation_summary: dict) -> str:
+    lines = [f"Lo que yo haria con la tarea {summary['title']}:"] 
+    lines.append(f"Estado general: {recommendation_summary['status_overview']}")
+    _append_recommendation_sections(lines, recommendation_summary)
+    return "\n".join(lines)
+
+
+def _format_scoped_recommendation_summary(summary: dict) -> str:
+    scope = summary.get("scope")
+    entity_name = summary.get("entity_name")
+    if scope == "project":
+        lines = [f"Lo que priorizaria en el proyecto {entity_name}:"] 
+    else:
+        lines = [f"Lo que yo haria con {entity_name}:"] 
+    lines.append(f"Estado general: {summary['status_overview']}")
+    _append_recommendation_sections(lines, summary)
+    return "\n".join(lines)
+
+
+def _format_global_recommendation_summary(task_snapshot: dict, project_snapshot: dict, client_snapshot: dict, *, focus: str) -> str:
+    if focus == "unblock":
+        lines = ["Lo que yo atacaria primero para destrabar mas ahora es:"]
+    elif focus == "close":
+        lines = ["Lo que mas conviene empujar para cerrar hoy es:"]
+    else:
+        lines = ["Lo que yo haria primero ahora es:"]
+
+    lines.append(f"Estado general: {task_snapshot['status_overview']}")
+    _append_recommendation_sections(lines, task_snapshot)
+
+    if project_snapshot["prioritized_projects"]:
+        lines.append("Proyectos donde pondria foco despues:")
+        for item in project_snapshot["prioritized_projects"][:2]:
+            lines.append(
+                f"- {item['project_name']} ({item['client_name']}) | Score: {item['score']} | Mejor foco: {item['top_recommendation'] or 'Sin tarea dominante'}"
+            )
+
+    if client_snapshot["prioritized_clients"]:
+        top_client = client_snapshot["prioritized_clients"][0]
+        lines.append(
+            f"Cliente donde veo mas impacto operativo: {top_client['client_name']} ({top_client['top_recommendation']})."
+        )
+
+    return "\n".join(lines)
+
+
 def _is_next_step_query(user_query: str | None) -> bool:
     if not user_query:
         return False
@@ -1708,6 +1967,36 @@ def _append_friction_sections(lines: list[str], summary: dict) -> None:
     recommendation = summary.get("recommendation")
     if recommendation:
         lines.append(f"Recomendacion: {recommendation}")
+
+
+def _append_recommendation_sections(lines: list[str], summary: dict) -> None:
+    recommendations = summary.get("recommendations") or []
+    if recommendations:
+        lines.append("Recomendaciones concretas:")
+        labels = ("Primero", "Como segunda opcion", "Como tercera opcion")
+        for index, item in enumerate(recommendations[:3]):
+            lines.append(_format_recommendation_item(item, prefix=labels[index]))
+    else:
+        lines.append("Recomendaciones concretas: no veo una recomendacion fuerte con los datos actuales.")
+
+    recommendation = summary.get("recommendation")
+    if recommendation:
+        lines.append(f"Recomendacion principal: {recommendation}")
+
+
+def _format_recommendation_item(item: dict, prefix: str) -> str:
+    reasons = ", ".join(item.get("recommendation_reasons", [])) or "impacto operativo"
+    line = f"- {prefix}: {item['title']}"
+    if item.get("project_name") and item.get("project_name") != "Sin proyecto":
+        line += f" | Proyecto: {item['project_name']}"
+    if item.get("client_name") and item.get("client_name") != "Desconocido":
+        line += f" | Cliente: {item['client_name']}"
+    line += f" | Porque: {reasons}"
+    if item.get("has_next_action") and item.get("next_action"):
+        line += f" | Proximo paso: {item['next_action']}"
+    elif item.get("missing_next_action"):
+        line += " | Recomendacion conservadora: definir proxima accion"
+    return line
 
 
 def _format_operational_item(item) -> str:
@@ -1775,6 +2064,14 @@ def _attach_friction_debug(parsed_query: dict, summary: dict, scope_override: st
     parsed_query["_friction_signals"] = [_debug_summary_item(item) for item in summary.get("signals", [])[:5]]
     parsed_query["_friction_entities"] = [_debug_summary_item(item) for item in summary.get("signals", [])[:5]]
     parsed_query["_friction_recommendation"] = summary.get("recommendation")
+
+
+def _attach_recommendation_debug(parsed_query: dict, summary: dict, scope_override: str | None = None) -> None:
+    parsed_query["_recommendation_scope"] = scope_override or summary.get("scope")
+    parsed_query["_recommendation_heuristic"] = summary.get("heuristic", [])
+    parsed_query["_recommendation_candidates"] = [_debug_summary_item(item) for item in summary.get("recommendations", [])[:3]]
+    parsed_query["_recommendation_reasons"] = [item.get("recommendation_reasons", []) for item in summary.get("recommendations", [])[:3]]
+    parsed_query["_recommendation_result"] = summary.get("recommendation")
 
 
 def _debug_summary_item(item):

@@ -85,6 +85,88 @@ def _parse_read_intents(normalized: str) -> dict | None:
     if any(
         phrase in normalized
         for phrase in [
+            "que haria ahora con este cliente",
+            "quÃ© harÃ­as ahora con este cliente",
+            "que me recomendas hacer con este cliente",
+            "quÃ© me recomendÃ¡s hacer con este cliente",
+        ]
+    ):
+        return {"intent": "get_operational_recommendation", "client_name": "este cliente"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que priorizarias en este proyecto",
+            "quÃ© priorizarÃ­as en este proyecto",
+            "que priorizarias en ese proyecto",
+            "quÃ© priorizarÃ­as en ese proyecto",
+        ]
+    ):
+        project_name = "este proyecto" if "este proyecto" in normalized else "ese proyecto"
+        return {"intent": "get_operational_recommendation", "project_name": project_name}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que me recomendas hacer con ",
+            "quÃ© me recomendÃ¡s hacer con ",
+            "que haria ahora con ",
+            "quÃ© harÃ­as ahora con ",
+        ]
+    ):
+        match = re.search(
+            r"(?:que me recomendas hacer con|quÃ© me recomendÃ¡s hacer con|que haria ahora con|quÃ© harÃ­as ahora con)\s+(.+)$",
+            normalized,
+        )
+        if match:
+            return {"intent": "get_operational_recommendation", "entity_hint": match.group(1).strip()}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que deberia priorizar aca",
+            "quÃ© deberÃ­a priorizar acÃ¡",
+            "que haria ahora",
+            "quÃ© harÃ­as ahora",
+        ]
+    ):
+        return {"intent": "get_operational_recommendation", "entity_hint": "aca"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que atacaria primero",
+            "quÃ© atacarÃ­a primero",
+            "que me conviene empujar primero",
+            "quÃ© me conviene empujar primero",
+            "si tuvieras que elegir una sola cosa",
+            "si tuvieras que elegir una sola cosa, cual seria",
+            "si tuvieras que elegir una sola cosa, cuÃ¡l serÃ­a",
+        ]
+    ):
+        return {"intent": "get_operational_recommendation", "recommendation_focus": "general"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que destraba mas ahora",
+            "quÃ© destraba mÃ¡s ahora",
+        ]
+    ):
+        return {"intent": "get_operational_recommendation", "recommendation_focus": "unblock"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que conviene cerrar hoy",
+            "quÃ© conviene cerrar hoy",
+        ]
+    ):
+        return {"intent": "get_operational_recommendation", "recommendation_focus": "close"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
             "que viene estancado",
             "qué viene estancado",
             "que esta frenado hace mucho",

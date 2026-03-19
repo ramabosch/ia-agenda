@@ -679,6 +679,55 @@ def build_task_friction_summary(summary: dict, today: date | None = None) -> dic
     }
 
 
+def get_operational_recommendation_snapshot(today: date | None = None, focus: str = "general") -> dict:
+    today = today or date.today()
+    tasks = get_all_tasks_with_relations()
+    return build_recommendation_focus_from_tasks(tasks, today=today, focus=focus)
+
+
+def build_recommendation_focus_from_tasks(tasks: list, today: date | None = None, focus: str = "general") -> dict:
+    today = today or date.today()
+    items = [_serialize_task_for_executive(task, today) for task in tasks]
+    open_items = [item for item in items if item["status"] != "hecha"]
+
+    ranked_items = [_decorate_recommendation_item(item, focus=focus) for item in open_items]
+    if focus == "close":
+        ranked_items = [item for item in ranked_items if not item["is_blocked"]]
+
+    ranked_items = sorted(ranked_items, key=_recommendation_rank_key)
+    top_recommendations = ranked_items[:3]
+
+    if not top_recommendations and open_items:
+        fallback = _decorate_recommendation_item(open_items[0], focus=focus, conservative_only=True)
+        top_recommendations = [fallback]
+
+    return {
+        "today": today.isoformat(),
+        "focus": focus,
+        "tasks": items,
+        "open_tasks": open_items,
+        "recommendations": top_recommendations,
+        "status_overview": _build_recommendation_status_overview(open_items, top_recommendations, focus),
+        "heuristic": _build_recommendation_heuristic(focus),
+        "recommendation": _build_recommendation_summary(top_recommendations, focus),
+    }
+
+
+def build_task_recommendation_summary(summary: dict, today: date | None = None, focus: str = "general") -> dict:
+    today = today or date.today()
+    item = _serialize_task_summary_for_recommendation(summary, today)
+    recommendation_item = _decorate_recommendation_item(item, focus=focus, allow_zero=True)
+
+    return {
+        "scope": "task",
+        "entity_name": summary.get("title"),
+        "status_overview": _build_recommendation_status_overview([item], [recommendation_item], focus),
+        "recommendations": [recommendation_item],
+        "heuristic": _build_recommendation_heuristic(focus),
+        "recommendation": recommendation_item["recommendation_text"],
+    }
+
+
 def _serialize_task_for_executive(task, today: date) -> dict:
     project = task.project
     client = project.client if project else None
@@ -1011,3 +1060,249 @@ def _days_since(value, today: date) -> int | None:
         return (today - value.date()).days
     except Exception:
         return None
+
+
+def _serialize_task_summary_for_recommendation(summary: dict, today: date) -> dict:
+    due_date = summary.get("due_date")
+    if due_date:
+        due_date = str(due_date)
+    next_action = (summary.get("next_action") or "").strip() or None
+    status = summary.get("status")
+    priority = summary.get("priority")
+    is_open = status != "hecha"
+    is_blocked = status == "bloqueada"
+    is_high_priority = priority == TaskPriority.HIGH.value
+    is_in_progress = status == "en_progreso"
+    due_value = summary.get("due_date")
+    is_due_today = bool(due_value and due_value == today and is_open)
+    is_overdue = bool(due_value and due_value < today and is_open)
+    created_at = summary.get("created_at")
+    last_updated_at = summary.get("last_updated_at")
+    age_days = _days_since(created_at, today)
+    update_days = _days_since(last_updated_at, today)
+    old_reference = update_days if update_days is not None else age_days
+    is_old_open = is_open and old_reference is not None and old_reference >= 14
+    is_old_blocked = is_blocked and old_reference is not None and old_reference >= 7
+    is_stale_in_progress = is_in_progress and old_reference is not None and old_reference >= 7
+    has_temporal_signal = age_days is not None or update_days is not None or bool(due_value)
+    missing_next_action = is_open and not next_action
+    blocked_without_next_action = is_blocked and missing_next_action
+    high_priority_without_next_action = is_high_priority and missing_next_action
+    friction_signals = _build_friction_signals(
+        is_blocked=is_blocked,
+        is_old_blocked=is_old_blocked,
+        is_stale_in_progress=is_stale_in_progress,
+        is_old_open=is_old_open,
+        is_high_priority=is_high_priority,
+        missing_next_action=missing_next_action,
+        has_temporal_signal=has_temporal_signal,
+    )
+
+    return {
+        "task_id": summary.get("task_id"),
+        "title": summary.get("title"),
+        "status": status,
+        "priority": priority,
+        "due_date": due_date,
+        "last_note": summary.get("last_note"),
+        "next_action": next_action,
+        "project_id": summary.get("project_id"),
+        "project_name": summary.get("project_name") or "Sin proyecto",
+        "client_id": summary.get("client_id"),
+        "client_name": summary.get("client_name") or "Desconocido",
+        "created_at": created_at,
+        "last_updated_at": last_updated_at,
+        "age_days": age_days,
+        "days_since_update": update_days,
+        "has_temporal_signal": has_temporal_signal,
+        "is_blocked": is_blocked,
+        "is_due_today": is_due_today,
+        "is_overdue": is_overdue,
+        "is_high_priority": is_high_priority,
+        "is_in_progress": is_in_progress,
+        "is_urgent": is_blocked or is_overdue or is_due_today or is_high_priority,
+        "has_next_action": bool(next_action),
+        "missing_next_action": missing_next_action,
+        "blocked_without_next_action": blocked_without_next_action,
+        "high_priority_without_next_action": high_priority_without_next_action,
+        "is_old_open": is_old_open,
+        "is_old_blocked": is_old_blocked,
+        "is_stale_in_progress": is_stale_in_progress,
+        "has_strong_stall_signal": is_old_blocked or is_stale_in_progress or is_old_open,
+        "needs_followup": blocked_without_next_action or high_priority_without_next_action,
+        "friction_signals": friction_signals,
+        "friction_score": _task_friction_score(
+            is_old_blocked=is_old_blocked,
+            is_blocked=is_blocked,
+            is_stale_in_progress=is_stale_in_progress,
+            is_old_open=is_old_open,
+            is_high_priority=is_high_priority,
+            missing_next_action=missing_next_action,
+            has_temporal_signal=has_temporal_signal,
+        ),
+        "score": _task_priority_score(
+            is_blocked=is_blocked,
+            is_overdue=is_overdue,
+            is_due_today=is_due_today,
+            is_high_priority=is_high_priority,
+            is_in_progress=is_in_progress,
+        ),
+    }
+
+
+def _decorate_recommendation_item(item: dict, *, focus: str, conservative_only: bool = False, allow_zero: bool = False) -> dict:
+    score = _task_recommendation_score(item, focus=focus, conservative_only=conservative_only)
+    reasons = _build_task_recommendation_reasons(item, focus=focus, conservative_only=conservative_only)
+    if score <= 0 and not allow_zero:
+        score = 5
+    recommendation_text = _build_task_recommendation_text(item, reasons, focus=focus, conservative_only=conservative_only)
+    decorated = dict(item)
+    decorated["recommendation_score"] = score
+    decorated["recommendation_reasons"] = reasons
+    decorated["recommendation_text"] = recommendation_text
+    return decorated
+
+
+def _task_recommendation_score(item: dict, *, focus: str, conservative_only: bool = False) -> int:
+    if conservative_only:
+        return 5
+
+    score = 0
+    if focus == "unblock":
+        score += 150 if item["is_old_blocked"] else 0
+        score += 120 if item["blocked_without_next_action"] else 0
+        score += 95 if item["is_blocked"] else 0
+        score += 50 if item["is_high_priority"] else 0
+        score += 35 if item["missing_next_action"] else 0
+        score += 25 if item["friction_score"] > 0 else 0
+        return score
+
+    if focus == "close":
+        score += 90 if item["has_next_action"] else 0
+        score += 70 if item["is_high_priority"] else 0
+        score += 60 if item["is_overdue"] or item["is_due_today"] else 0
+        score += 35 if item["is_old_open"] else 0
+        score -= 90 if item["is_blocked"] else 0
+        score -= 40 if item["missing_next_action"] else 0
+        return score
+
+    score += 150 if item["is_old_blocked"] else 0
+    score += 125 if item["blocked_without_next_action"] else 0
+    score += 110 if item["is_blocked"] else 0
+    score += 100 if item["is_overdue"] else 0
+    score += 75 if item["is_due_today"] else 0
+    score += 85 if item["high_priority_without_next_action"] else 0
+    score += 65 if item["is_stale_in_progress"] else 0
+    score += 55 if item["is_high_priority"] else 0
+    score += 40 if item["is_old_open"] else 0
+    score += 35 if item["missing_next_action"] else 0
+    score += 25 if item["has_next_action"] else 0
+    return score
+
+
+def _build_task_recommendation_reasons(item: dict, *, focus: str, conservative_only: bool = False) -> list[str]:
+    if conservative_only:
+        return ["no veo una senal fuerte, asi que iria por una recomendacion conservadora"]
+
+    reasons: list[str] = []
+    if item["is_old_blocked"]:
+        reasons.append("esta bloqueada hace tiempo")
+    elif item["blocked_without_next_action"]:
+        reasons.append("esta bloqueada y sin proxima accion")
+    elif item["is_blocked"]:
+        reasons.append("esta bloqueada")
+
+    if item["is_overdue"]:
+        reasons.append("esta vencida")
+    elif item["is_due_today"]:
+        reasons.append("vence hoy")
+
+    if item["high_priority_without_next_action"]:
+        reasons.append("es de alta prioridad y no tiene proxima accion")
+    elif item["is_high_priority"]:
+        reasons.append("es de alta prioridad")
+
+    if item["is_stale_in_progress"]:
+        reasons.append("lleva demasiado en progreso")
+    elif item["is_old_open"]:
+        reasons.append("lleva bastante abierta")
+
+    if focus == "close" and item["has_next_action"]:
+        reasons.append("ya tiene un siguiente paso concreto para empujar cierre")
+    elif item["has_next_action"]:
+        reasons.append("ya tiene un siguiente paso claro")
+    elif item["missing_next_action"]:
+        reasons.append("le falta seguimiento concreto")
+
+    if not reasons:
+        reasons.append("merece atencion operativa con los datos actuales")
+
+    return reasons[:4]
+
+
+def _build_task_recommendation_text(item: dict, reasons: list[str], *, focus: str, conservative_only: bool = False) -> str:
+    reasons_text = ", ".join(reasons)
+    if conservative_only:
+        return f"Iria primero por '{item['title']}', pero de forma conservadora: {reasons_text}."
+    if focus == "unblock":
+        return f"Recomiendo atacar '{item['title']}' para destrabar trabajo, porque {reasons_text}."
+    if focus == "close":
+        return f"Conviene empujar '{item['title']}' para intentar cerrarla hoy, porque {reasons_text}."
+    return f"Recomiendo empezar por '{item['title']}', porque {reasons_text}."
+
+
+def _recommendation_rank_key(item: dict) -> tuple:
+    due_sort = item["due_date"] or "9999-12-31"
+    return (
+        -item["recommendation_score"],
+        -int(item["has_next_action"]),
+        due_sort,
+        item["client_name"],
+        item["project_name"],
+        item["title"],
+    )
+
+
+def _build_recommendation_status_overview(open_items: list[dict], recommendations: list[dict], focus: str) -> str:
+    if not open_items:
+        return "No veo trabajo abierto para recomendar ahora."
+    if not recommendations:
+        return "Veo trabajo abierto, pero no una recomendacion fuerte con los datos actuales."
+
+    if focus == "unblock":
+        return f"Hay {len(open_items)} tareas abiertas y la recomendacion prioriza donde mas destrabe veo."
+    if focus == "close":
+        return f"Hay {len(open_items)} tareas abiertas y la recomendacion prioriza lo mas cerrable con sentido operativo."
+    return f"Hay {len(open_items)} tareas abiertas y priorice donde veo mas impacto operativo inmediato."
+
+
+def _build_recommendation_summary(recommendations: list[dict], focus: str) -> str:
+    if not recommendations:
+        return "Iria por una recomendacion conservadora: definir el siguiente paso mas concreto antes de mover otras cosas."
+    top = recommendations[0]
+    if focus == "unblock":
+        return f"Yo intentaria destrabar primero '{top['title']}', porque hoy parece la jugada con mas impacto."
+    if focus == "close":
+        return f"Hoy intentaria cerrar '{top['title']}', porque es la opcion mas empujable con los datos actuales."
+    return f"Si tuviera que elegir una sola cosa, iria primero por '{top['title']}'."
+
+
+def _build_recommendation_heuristic(focus: str) -> list[str]:
+    if focus == "unblock":
+        return [
+            "bloqueadas y bloqueadas viejas primero",
+            "despues alta prioridad sin proxima accion",
+            "despues otros focos de friccion que destraban trabajo",
+        ]
+    if focus == "close":
+        return [
+            "prioriza tareas no bloqueadas con siguiente paso claro",
+            "despues urgencia y prioridad",
+            "sin dato de esfuerzo se mantiene una recomendacion conservadora",
+        ]
+    return [
+        "bloqueadas criticas primero",
+        "despues vencidas o alta prioridad sin proxima accion",
+        "despues progreso estancado o abiertas viejas",
+        "si faltan datos, se baja a recomendacion conservadora",
+    ]

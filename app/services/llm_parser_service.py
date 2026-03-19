@@ -30,6 +30,7 @@ ALLOWED_INTENTS = {
     "get_general_executive_summary",
     "get_operational_summary",
     "get_operational_friction_summary",
+    "get_operational_recommendation",
     "get_next_actions_summary",
     "get_missing_next_actions_summary",
     "get_followup_needed_summary",
@@ -65,6 +66,7 @@ EMPTY_PAYLOAD = {
     "next_action": None,
     "last_note": None,
     "entity_hint": None,
+    "recommendation_focus": None,
 }
 
 EXAMPLES_BLOCK = """
@@ -84,7 +86,8 @@ JSON:
   "new_priority": null,
   "priority_direction": null,
   "next_action": null,
-  "last_note": null
+  "last_note": null,
+  "recommendation_focus": null
 }
 
 Usuario: decime los proyectos de rosario capilar
@@ -101,7 +104,8 @@ JSON:
   "new_priority": null,
   "priority_direction": null,
   "next_action": null,
-  "last_note": null
+  "last_note": null,
+  "recommendation_focus": null
 }
 
 Usuario: decime las tareas de automatizacion de cam
@@ -186,7 +190,8 @@ JSON:
   "new_priority": null,
   "priority_direction": null,
   "next_action": null,
-  "last_note": "falta validar con el cliente"
+  "last_note": "falta validar con el cliente",
+  "recommendation_focus": null
 }
 
 Usuario: deja como proxima accion llamar manana
@@ -203,7 +208,8 @@ JSON:
   "new_priority": null,
   "priority_direction": null,
   "next_action": "llamar manana",
-  "last_note": null
+  "last_note": null,
+  "recommendation_focus": null
 }
 
 Usuario: resumime el cliente Dallas
@@ -220,7 +226,8 @@ JSON:
   "new_priority": null,
   "priority_direction": null,
   "next_action": null,
-  "last_note": null
+  "last_note": null,
+  "recommendation_focus": null
 }
 
 Usuario: y sus proyectos?
@@ -237,7 +244,8 @@ JSON:
   "new_priority": null,
   "priority_direction": null,
   "next_action": null,
-  "last_note": null
+  "last_note": null,
+  "recommendation_focus": null
 }
 
 Usuario: ponelo en alta
@@ -254,7 +262,8 @@ JSON:
   "new_priority": "alta",
   "priority_direction": null,
   "next_action": null,
-  "last_note": null
+  "last_note": null,
+  "recommendation_focus": null
 }
 
 Usuario: que esta bloqueado
@@ -271,7 +280,8 @@ JSON:
   "new_priority": null,
   "priority_direction": null,
   "next_action": null,
-  "last_note": null
+  "last_note": null,
+  "recommendation_focus": null
 }
 
 Usuario: que deberia hacer hoy
@@ -288,7 +298,8 @@ JSON:
   "new_priority": null,
   "priority_direction": null,
   "next_action": null,
-  "last_note": null
+  "last_note": null,
+  "recommendation_focus": null
 }
 
 Usuario: que cliente necesita atencion primero
@@ -305,7 +316,8 @@ JSON:
   "new_priority": null,
   "priority_direction": null,
   "next_action": null,
-  "last_note": null
+  "last_note": null,
+  "recommendation_focus": null
 }
 
 Usuario: que proyecto esta mas trabado
@@ -322,7 +334,8 @@ JSON:
   "new_priority": null,
   "priority_direction": null,
   "next_action": null,
-  "last_note": null
+  "last_note": null,
+  "recommendation_focus": null
 }
 
 Usuario: que sigue para este cliente
@@ -408,7 +421,8 @@ JSON:
   "priority_direction": null,
   "next_action": null,
   "last_note": null,
-  "entity_hint": "cam"
+  "entity_hint": "cam",
+  "recommendation_focus": null
 }
 
 Usuario: que viene estancado
@@ -426,7 +440,27 @@ JSON:
   "priority_direction": null,
   "next_action": null,
   "last_note": null,
-  "entity_hint": null
+  "entity_hint": null,
+  "recommendation_focus": null
+}
+
+Usuario: que me recomendas hacer con cam
+JSON:
+{
+  "intent": "get_operational_recommendation",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null,
+  "entity_hint": "cam",
+  "recommendation_focus": null
 }
 
 Usuario: dashboard
@@ -444,7 +478,8 @@ JSON:
   "priority_direction": null,
   "next_action": null,
   "last_note": null,
-  "entity_hint": "dashboard"
+  "entity_hint": "dashboard",
+  "recommendation_focus": null
 }
 """.strip()
 
@@ -485,6 +520,7 @@ Intentos permitidos:
 - get_general_executive_summary
 - get_operational_summary
 - get_operational_friction_summary
+- get_operational_recommendation
 - get_next_actions_summary
 - get_missing_next_actions_summary
 - get_followup_needed_summary
@@ -519,7 +555,8 @@ Schema exacto:
   "priority_direction": null,
   "next_action": null,
   "last_note": null,
-  "entity_hint": null
+  "entity_hint": null,
+  "recommendation_focus": null
 }}
 
 {EXAMPLES_BLOCK}
@@ -601,6 +638,7 @@ def _validate_payload_shape(payload: dict[str, Any]) -> dict[str, Any] | None:
     clean["next_action"] = _normalize_nullable_string(clean.get("next_action"))
     clean["last_note"] = _normalize_nullable_string(clean.get("last_note"))
     clean["entity_hint"] = _normalize_nullable_string(clean.get("entity_hint"))
+    clean["recommendation_focus"] = _normalize_nullable_string(clean.get("recommendation_focus"))
 
     clean["task_id"] = _normalize_int_or_none(clean.get("task_id"))
     clean["project_id"] = _normalize_int_or_none(clean.get("project_id"))
@@ -649,6 +687,12 @@ def _coerce_semantics(payload: dict[str, Any], user_query: str) -> dict[str, Any
             payload["intent"] = "unknown"
 
     if intent == "get_operational_friction_summary":
+        if not payload.get("entity_hint"):
+            payload["entity_hint"] = task_name or project_name or client_name
+        if not any([payload.get("entity_hint"), client_name, project_name, task_name, task_id, project_id]):
+            payload["intent"] = "unknown"
+
+    if intent == "get_operational_recommendation":
         if not payload.get("entity_hint"):
             payload["entity_hint"] = task_name or project_name or client_name
         if not any([payload.get("entity_hint"), client_name, project_name, task_name, task_id, project_id]):
