@@ -85,6 +85,108 @@ def _parse_read_intents(normalized: str) -> dict | None:
     if any(
         phrase in normalized
         for phrase in [
+            "que me preocuparia",
+            "quÃ© me preocuparÃ­a",
+        ]
+    ) and " de " not in normalized:
+        return {"intent": "get_followup_focus_summary", "followup_focus": "friction"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "por que esa",
+            "por quÃ© esa",
+            "por que eso seria lo primero",
+            "por quÃ© eso serÃ­a lo primero",
+        ]
+    ):
+        return {"intent": "get_recommendation_explanation"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "y despues de eso",
+            "y despuÃ©s de eso",
+        ]
+    ):
+        return {"intent": "get_followup_focus_summary", "followup_focus": "next_after_recommendation"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "mostrame solo lo critico",
+            "mostrame solo lo crÃ­tico",
+        ]
+    ):
+        return {"intent": "get_filtered_context_summary", "filter_mode": "critical"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "y solo lo urgente",
+            "solo lo urgente",
+        ]
+    ):
+        return {"intent": "get_filtered_context_summary", "filter_mode": "urgent"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "quiero ver solo tareas bloqueadas",
+            "solo tareas bloqueadas",
+        ]
+    ):
+        return {"intent": "get_filtered_context_summary", "filter_mode": "blocked"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "resumimelo en 3 lineas",
+            "resumimelo en tres lineas",
+            "resumimelo en 3 lÃ­neas",
+        ]
+    ):
+        return {"intent": "get_rephrased_summary", "rephrase_style": "three_lines"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "damelo mas ejecutivo",
+            "dÃ¡melo mÃ¡s ejecutivo",
+        ]
+    ):
+        return {"intent": "get_rephrased_summary", "rephrase_style": "executive"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "explicamelo simple",
+            "explicÃ¡melo simple",
+        ]
+    ):
+        return {"intent": "get_rephrased_summary", "rephrase_style": "simple"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "decimelo mas corto",
+            "decÃ­melo mÃ¡s corto",
+        ]
+    ):
+        return {"intent": "get_rephrased_summary", "rephrase_style": "short"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que le diria al cliente hoy",
+            "quÃ© le dirÃ­a al cliente hoy",
+        ]
+    ):
+        return {"intent": "get_client_facing_summary"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
             "que haria ahora con este cliente",
             "quÃ© harÃ­as ahora con este cliente",
             "que me recomendas hacer con este cliente",

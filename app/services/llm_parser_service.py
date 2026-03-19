@@ -31,6 +31,11 @@ ALLOWED_INTENTS = {
     "get_operational_summary",
     "get_operational_friction_summary",
     "get_operational_recommendation",
+    "get_followup_focus_summary",
+    "get_recommendation_explanation",
+    "get_filtered_context_summary",
+    "get_rephrased_summary",
+    "get_client_facing_summary",
     "get_next_actions_summary",
     "get_missing_next_actions_summary",
     "get_followup_needed_summary",
@@ -67,6 +72,9 @@ EMPTY_PAYLOAD = {
     "last_note": None,
     "entity_hint": None,
     "recommendation_focus": None,
+    "followup_focus": None,
+    "filter_mode": None,
+    "rephrase_style": None,
 }
 
 EXAMPLES_BLOCK = """
@@ -463,6 +471,28 @@ JSON:
   "recommendation_focus": null
 }
 
+Usuario: por que esa
+JSON:
+{
+  "intent": "get_recommendation_explanation",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null,
+  "entity_hint": null,
+  "recommendation_focus": null,
+  "followup_focus": null,
+  "filter_mode": null,
+  "rephrase_style": null
+}
+
 Usuario: dashboard
 JSON:
 {
@@ -556,7 +586,10 @@ Schema exacto:
   "next_action": null,
   "last_note": null,
   "entity_hint": null,
-  "recommendation_focus": null
+  "recommendation_focus": null,
+  "followup_focus": null,
+  "filter_mode": null,
+  "rephrase_style": null
 }}
 
 {EXAMPLES_BLOCK}
@@ -639,6 +672,9 @@ def _validate_payload_shape(payload: dict[str, Any]) -> dict[str, Any] | None:
     clean["last_note"] = _normalize_nullable_string(clean.get("last_note"))
     clean["entity_hint"] = _normalize_nullable_string(clean.get("entity_hint"))
     clean["recommendation_focus"] = _normalize_nullable_string(clean.get("recommendation_focus"))
+    clean["followup_focus"] = _normalize_nullable_string(clean.get("followup_focus"))
+    clean["filter_mode"] = _normalize_nullable_string(clean.get("filter_mode"))
+    clean["rephrase_style"] = _normalize_nullable_string(clean.get("rephrase_style"))
 
     clean["task_id"] = _normalize_int_or_none(clean.get("task_id"))
     clean["project_id"] = _normalize_int_or_none(clean.get("project_id"))

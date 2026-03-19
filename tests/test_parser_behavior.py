@@ -69,6 +69,21 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(close["recommendation_focus"], "close")
         self.assertEqual(contextual["project_name"], "este proyecto")
 
+    def test_parse_conversational_drilldown_queries(self):
+        why = parse_user_query("por que esa")
+        next_one = parse_user_query("y despues de eso?")
+        critical = parse_user_query("mostrame solo lo critico")
+        short = parse_user_query("resumimelo en 3 lineas")
+        client_facing = parse_user_query("que le diria al cliente hoy")
+        self.assertEqual(why["intent"], "get_recommendation_explanation")
+        self.assertEqual(next_one["intent"], "get_followup_focus_summary")
+        self.assertEqual(next_one["followup_focus"], "next_after_recommendation")
+        self.assertEqual(critical["intent"], "get_filtered_context_summary")
+        self.assertEqual(critical["filter_mode"], "critical")
+        self.assertEqual(short["intent"], "get_rephrased_summary")
+        self.assertEqual(short["rephrase_style"], "three_lines")
+        self.assertEqual(client_facing["intent"], "get_client_facing_summary")
+
     def test_parse_contextual_followups(self):
         projects = parse_user_query("y sus proyectos?")
         close_task = parse_user_query("cerrala")

@@ -96,6 +96,14 @@ RECOMMENDATION_INTENTS = {
     "get_operational_recommendation",
 }
 
+CONTINUITY_INTENTS = {
+    "get_followup_focus_summary",
+    "get_recommendation_explanation",
+    "get_filtered_context_summary",
+    "get_rephrased_summary",
+    "get_client_facing_summary",
+}
+
 
 def build_response_from_query(
     parsed_query: dict,
@@ -128,6 +136,13 @@ def build_response_from_query(
         return _handle_operational_recommendation_intent(
             parsed_query,
             resolved_references,
+            user_query=user_query,
+            conversation_context=conversation_context,
+        )
+
+    if intent in CONTINUITY_INTENTS:
+        return _handle_conversational_continuity_intent(
+            parsed_query,
             user_query=user_query,
             conversation_context=conversation_context,
         )
@@ -1171,6 +1186,120 @@ def _build_client_recommendation_snapshot(task_snapshot: dict) -> dict:
     return {"prioritized_clients": ranked[:5]}
 
 
+def _handle_conversational_continuity_intent(
+    parsed_query: dict,
+    *,
+    user_query: str | None,
+    conversation_context: dict | None,
+) -> str:
+    context = conversation_context or {}
+    snapshot = context.get("response_snapshot") if isinstance(context, dict) else None
+
+    parsed_query["_continuity_type"] = parsed_query.get("intent")
+    parsed_query["_continuity_used_context"] = bool(context.get("_isolated"))
+    parsed_query["_continuity_used_recommendation"] = bool(snapshot and snapshot.get("recommendations"))
+    parsed_query["_continuity_filter_mode"] = parsed_query.get("filter_mode")
+    parsed_query["_continuity_rephrase_style"] = parsed_query.get("rephrase_style")
+    parsed_query["_context_source"] = "current" if context.get("_isolated") else "none"
+    parsed_query["_context_isolated"] = bool(context.get("_isolated"))
+    parsed_query["_recent_context_used"] = context if context.get("_isolated") else {}
+
+    if not context or not context.get("_isolated"):
+        return _abort_with_context(
+            parsed_query,
+            "No tengo contexto aislado actual para continuar esa conversacion con seguridad.",
+        )
+
+    if parsed_query.get("intent") == "get_followup_focus_summary":
+        followup_focus = parsed_query.get("followup_focus")
+        if followup_focus == "friction":
+            response = _build_contextual_friction_summary(parsed_query, context, context.get("scope"))
+            if response:
+                return response
+            return _abort_with_context(parsed_query, "No pude reutilizar el contexto actual para profundizar en lo que preocupa.")
+
+        if followup_focus == "next_after_recommendation":
+            if not snapshot or not snapshot.get("recommendations"):
+                return _abort_with_context(
+                    parsed_query,
+                    "No tengo una recomendacion previa clara en esta conversacion actual para decirte que iria despues.",
+                )
+            response = _format_next_recommendation_followup(snapshot)
+            _store_response_snapshot(
+                parsed_query,
+                {
+                    **snapshot,
+                    "response_kind": "followup_next_recommendation",
+                    "status_overview": snapshot.get("status_overview"),
+                    "recommendation": response,
+                },
+            )
+            return response
+
+    if parsed_query.get("intent") == "get_recommendation_explanation":
+        if not snapshot or not snapshot.get("recommendations"):
+            return _abort_with_context(
+                parsed_query,
+                "No tengo una recomendacion previa clara en esta conversacion actual para explicarte por que seria la primera.",
+            )
+        response = _format_recommendation_explanation(snapshot)
+        _store_response_snapshot(
+            parsed_query,
+            {
+                **snapshot,
+                "response_kind": "recommendation_explanation",
+                "recommendation": response,
+            },
+        )
+        return response
+
+    if parsed_query.get("intent") == "get_filtered_context_summary":
+        if not snapshot:
+            return _abort_with_context(
+                parsed_query,
+                "No tengo una respuesta previa clara en esta conversacion actual para filtrarla.",
+            )
+        response, filtered_snapshot = _format_filtered_context_summary(snapshot, parsed_query.get("filter_mode"))
+        _store_response_snapshot(parsed_query, filtered_snapshot)
+        return response
+
+    if parsed_query.get("intent") == "get_rephrased_summary":
+        if not snapshot:
+            return _abort_with_context(
+                parsed_query,
+                "No tengo una respuesta previa clara en esta conversacion actual para reformularla.",
+            )
+        response = _format_rephrased_summary(snapshot, parsed_query.get("rephrase_style"))
+        _store_response_snapshot(
+            parsed_query,
+            {
+                **snapshot,
+                "response_kind": "rephrased_summary",
+                "recommendation": snapshot.get("recommendation"),
+            },
+        )
+        return response
+
+    if parsed_query.get("intent") == "get_client_facing_summary":
+        if not snapshot:
+            return _abort_with_context(
+                parsed_query,
+                "No tengo una respuesta previa clara en esta conversacion actual para traducirla a una version para cliente.",
+            )
+        response = _format_client_facing_summary(context, snapshot)
+        _store_response_snapshot(
+            parsed_query,
+            {
+                **snapshot,
+                "response_kind": "client_facing_summary",
+                "recommendation": snapshot.get("recommendation"),
+            },
+        )
+        return response
+
+    return _abort_with_context(parsed_query, "No pude interpretar ese follow-up conversacional con seguridad.")
+
+
 def _format_scoped_followup_list(parsed_query: dict, *, scope: str, scope_name: str, tasks: list) -> str:
     items = _build_followup_items_from_tasks(tasks)
     open_items = [item for item in items if item["status"] != "hecha"]
@@ -1910,6 +2039,115 @@ def _format_global_recommendation_summary(task_snapshot: dict, project_snapshot:
     return "\n".join(lines)
 
 
+def _format_next_recommendation_followup(snapshot: dict) -> str:
+    recommendations = snapshot.get("recommendations") or []
+    if len(recommendations) < 2:
+        return "Despues de eso, no veo una segunda jugada claramente mas fuerte con los datos actuales."
+
+    second = recommendations[1]
+    reasons = ", ".join(second.get("recommendation_reasons", [])) or "impacto operativo"
+    lines = [f"Despues de eso, iria con '{second['title']}'."]
+    lines.append(f"Porque: {reasons}.")
+    if second.get("has_next_action") and second.get("next_action"):
+        lines.append(f"Proximo paso: {second['next_action']}.")
+    elif second.get("missing_next_action"):
+        lines.append("Antes de empujarla, definiria una proxima accion concreta.")
+    return "\n".join(lines)
+
+
+def _format_recommendation_explanation(snapshot: dict) -> str:
+    top = (snapshot.get("recommendations") or [None])[0]
+    if not top:
+        return "No tengo una recomendacion previa concreta para explicar."
+
+    reasons = top.get("recommendation_reasons", [])
+    lines = [f"Te dije primero '{top['title']}' por estas razones:"]
+    for reason in reasons[:4]:
+        lines.append(f"- {reason}")
+    if top.get("has_next_action") and top.get("next_action"):
+        lines.append(f"Ademas, ya tiene un siguiente paso claro: {top['next_action']}.")
+    elif top.get("missing_next_action"):
+        lines.append("Y como no tiene proxima accion clara, ordenarla ayuda a bajar friccion rapido.")
+    return "\n".join(lines)
+
+
+def _format_filtered_context_summary(snapshot: dict, filter_mode: str | None) -> tuple[str, dict]:
+    items = _snapshot_items(snapshot)
+    filtered = [item for item in items if _matches_snapshot_filter(item, filter_mode)]
+    label = {
+        "critical": "solo lo critico",
+        "urgent": "solo lo urgente",
+        "blocked": "solo las bloqueadas",
+    }.get(filter_mode, "este filtro")
+
+    filtered_snapshot = {
+        **snapshot,
+        "response_kind": "filtered_summary",
+        "filter_mode": filter_mode,
+        "items": filtered[:5],
+        "highlights": filtered[:5],
+        "blockers": [item for item in filtered if item.get("is_blocked")][:5],
+    }
+
+    if not filtered:
+        return (f"En el contexto actual no veo elementos que entren en {label}.", filtered_snapshot)
+
+    lines = [f"Te muestro {label} dentro del contexto actual:"]
+    for item in filtered[:5]:
+        lines.append(_format_snapshot_item(item))
+    return "\n".join(lines), filtered_snapshot
+
+
+def _format_rephrased_summary(snapshot: dict, rephrase_style: str | None) -> str:
+    entity_name = snapshot.get("entity_name") or "este contexto"
+    recommendation = snapshot.get("recommendation") or "No veo una recomendacion principal fuerte con los datos actuales."
+    top_items = _snapshot_items(snapshot)[:2]
+    top_line = _format_snapshot_item(top_items[0]) if top_items else "- No veo un punto dominante."
+
+    if rephrase_style == "three_lines":
+        lines = [
+            f"Resumen rapido de {entity_name}: {snapshot.get('status_overview') or 'sin cambios fuertes.'}",
+            top_line,
+            f"Cierre: {recommendation}",
+        ]
+        return "\n".join(lines[:3])
+
+    if rephrase_style == "executive":
+        lines = [
+            f"Version ejecutiva de {entity_name}:",
+            f"- Estado: {snapshot.get('status_overview') or 'Sin señal dominante.'}",
+            f"- Foco: {top_line.removeprefix('- ')}",
+            f"- Decision: {recommendation}",
+        ]
+        return "\n".join(lines)
+
+    if rephrase_style == "simple":
+        lines = [
+            f"En simple: con {entity_name}, lo principal es esto.",
+            top_line,
+            f"Lo que haria es: {recommendation}",
+        ]
+        return "\n".join(lines)
+
+    lines = [
+        f"En corto: {snapshot.get('status_overview') or 'No veo un cambio fuerte.'}",
+        f"Principal foco: {top_line.removeprefix('- ')}",
+    ]
+    return "\n".join(lines)
+
+
+def _format_client_facing_summary(context: dict, snapshot: dict) -> str:
+    entity_name = snapshot.get("entity_name") or context.get(context.get("scope", ""), {}).get("name") or "el tema actual"
+    top_items = _snapshot_items(snapshot)[:2]
+    lines = [f"Si hoy se lo dijera al cliente sobre {entity_name}, diria algo asi:"]
+    lines.append("- Estamos siguiendo los puntos prioritarios y hoy el foco principal esta en ordenar lo mas sensible.")
+    if top_items:
+        lines.append(f"- El punto mas importante hoy es {top_items[0].get('title', 'el foco principal')} y ya estamos sobre eso.")
+    if snapshot.get("recommendation"):
+        lines.append(f"- Proximo movimiento interno: {snapshot['recommendation']}")
+    return "\n".join(lines)
+
+
 def _is_next_step_query(user_query: str | None) -> bool:
     if not user_query:
         return False
@@ -1999,6 +2237,64 @@ def _format_recommendation_item(item: dict, prefix: str) -> str:
     return line
 
 
+def _format_snapshot_item(item: dict) -> str:
+    title = item.get("title") or item.get("name") or "item"
+    line = f"- {title}"
+    if item.get("project_name") and item.get("project_name") != "Sin proyecto":
+        line += f" | Proyecto: {item['project_name']}"
+    if item.get("client_name") and item.get("client_name") != "Desconocido":
+        line += f" | Cliente: {item['client_name']}"
+    reasons = item.get("recommendation_reasons") or item.get("friction_signals") or []
+    if reasons:
+        line += f" | {'; '.join(reasons[:3])}"
+    elif item.get("status") or item.get("priority"):
+        line += f" | Estado: {item.get('status', 'n/d')} | Prioridad: {item.get('priority', 'n/d')}"
+    if item.get("has_next_action") and item.get("next_action"):
+        line += f" | Proximo paso: {item['next_action']}"
+    elif item.get("missing_next_action"):
+        line += " | Sin proxima accion definida"
+    return line
+
+
+def _snapshot_items(snapshot: dict) -> list[dict]:
+    items = []
+    for key in ("recommendations", "blockers", "highlights", "items", "signals", "next_steps"):
+        values = snapshot.get(key) or []
+        for item in values:
+            if isinstance(item, dict):
+                items.append(item)
+    deduped: list[dict] = []
+    seen: set[tuple] = set()
+    for item in items:
+        key = (
+            item.get("task_id"),
+            item.get("title"),
+            item.get("project_name"),
+            item.get("client_name"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _matches_snapshot_filter(item: dict, filter_mode: str | None) -> bool:
+    if filter_mode == "blocked":
+        return bool(item.get("is_blocked")) or "bloqueada" in " ".join(item.get("friction_signals", []))
+    if filter_mode == "urgent":
+        return bool(item.get("is_urgent") or item.get("is_overdue") or item.get("is_due_today") or item.get("is_high_priority") or item.get("is_blocked"))
+    if filter_mode == "critical":
+        return bool(
+            item.get("is_blocked")
+            or item.get("is_high_priority")
+            or item.get("is_overdue")
+            or item.get("has_strong_stall_signal")
+            or item.get("recommendation_score", 0) >= 120
+        )
+    return True
+
+
 def _format_operational_item(item) -> str:
     if isinstance(item, str):
         return f"- {item}"
@@ -2056,6 +2352,20 @@ def _attach_operational_summary_debug(parsed_query: dict, advanced_summary: dict
     parsed_query["_summary_blockers"] = [_debug_summary_item(item) for item in advanced_summary.get("risk_items", [])[:3]]
     parsed_query["_summary_next_steps"] = [_debug_summary_item(item) for item in advanced_summary.get("next_steps", [])[:3]]
     parsed_query["_summary_recommendation"] = advanced_summary.get("recommendation")
+    _store_response_snapshot(
+        parsed_query,
+        {
+            "response_kind": "summary",
+            "scope": scope_override or advanced_summary.get("scope"),
+            "entity_name": advanced_summary.get("entity_name"),
+            "status_overview": advanced_summary.get("status_overview"),
+            "highlights": advanced_summary.get("important_pending", [])[:3],
+            "blockers": advanced_summary.get("risk_items", [])[:3],
+            "next_steps": advanced_summary.get("next_steps", [])[:3],
+            "recommendation": advanced_summary.get("recommendation"),
+            "items": advanced_summary.get("attention_items", [])[:3],
+        },
+    )
 
 
 def _attach_friction_debug(parsed_query: dict, summary: dict, scope_override: str | None = None) -> None:
@@ -2064,6 +2374,19 @@ def _attach_friction_debug(parsed_query: dict, summary: dict, scope_override: st
     parsed_query["_friction_signals"] = [_debug_summary_item(item) for item in summary.get("signals", [])[:5]]
     parsed_query["_friction_entities"] = [_debug_summary_item(item) for item in summary.get("signals", [])[:5]]
     parsed_query["_friction_recommendation"] = summary.get("recommendation")
+    _store_response_snapshot(
+        parsed_query,
+        {
+            "response_kind": "friction",
+            "scope": scope_override or summary.get("scope"),
+            "entity_name": summary.get("entity_name"),
+            "status_overview": summary.get("status_overview"),
+            "signals": summary.get("signals", [])[:5],
+            "blockers": summary.get("signals", [])[:5],
+            "recommendation": summary.get("recommendation"),
+            "items": summary.get("signals", [])[:5],
+        },
+    )
 
 
 def _attach_recommendation_debug(parsed_query: dict, summary: dict, scope_override: str | None = None) -> None:
@@ -2072,6 +2395,18 @@ def _attach_recommendation_debug(parsed_query: dict, summary: dict, scope_overri
     parsed_query["_recommendation_candidates"] = [_debug_summary_item(item) for item in summary.get("recommendations", [])[:3]]
     parsed_query["_recommendation_reasons"] = [item.get("recommendation_reasons", []) for item in summary.get("recommendations", [])[:3]]
     parsed_query["_recommendation_result"] = summary.get("recommendation")
+    _store_response_snapshot(
+        parsed_query,
+        {
+            "response_kind": "recommendation",
+            "scope": scope_override or summary.get("scope"),
+            "entity_name": summary.get("entity_name"),
+            "status_overview": summary.get("status_overview"),
+            "recommendations": summary.get("recommendations", [])[:3],
+            "recommendation": summary.get("recommendation"),
+            "items": summary.get("recommendations", [])[:3],
+        },
+    )
 
 
 def _debug_summary_item(item):
@@ -2086,6 +2421,16 @@ def _debug_summary_item(item):
         "priority": item.get("priority"),
         "friction_signals": item.get("friction_signals"),
     }
+
+
+def _store_response_snapshot(parsed_query: dict, snapshot: dict) -> None:
+    parsed_query["_response_snapshot"] = snapshot
+    context = parsed_query.get("_conversation_context")
+    if not isinstance(context, dict):
+        context = _base_conversation_context(parsed_query, snapshot.get("scope", "none"))
+    context["response_snapshot"] = snapshot
+    context["last_response_kind"] = snapshot.get("response_kind")
+    parsed_query["_conversation_context"] = context
 
 
 def _remember_context(
