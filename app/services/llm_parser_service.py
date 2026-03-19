@@ -43,6 +43,7 @@ ALLOWED_INTENTS = {
     "get_due_tasks_summary",
     "get_overdue_tasks_summary",
     "get_missing_due_date_summary",
+    "compound_query",
     "clarify_entity_reference",
     "create_task",
     "create_followup",
@@ -567,6 +568,7 @@ Intentos permitidos:
 - get_due_tasks_summary
 - get_overdue_tasks_summary
 - get_missing_due_date_summary
+- compound_query
 - clarify_entity_reference
 - create_task
 - create_followup
@@ -764,6 +766,9 @@ def _coerce_semantics(payload: dict[str, Any], user_query: str) -> dict[str, Any
             payload["intent"] = "unknown"
         if not project_name and not payload.get("entity_hint"):
             payload["project_name"] = "este proyecto"
+
+    if intent == "compound_query":
+        payload["intent"] = "unknown"
 
     if intent == "get_due_tasks_summary":
         if payload.get("time_scope") not in {"today", "tomorrow", "this_week", "due_items"}:

@@ -162,6 +162,23 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(week_followups["temporal_focus"], "followups")
         self.assertEqual(missing_due["intent"], "get_missing_due_date_summary")
 
+    def test_parse_compound_queries(self):
+        summary_and_recommend = parse_user_query("resumime Cam y decime que haria primero")
+        temporal_and_friction = parse_user_query("que vence y que me preocuparia")
+        urgent_and_overdue = parse_user_query("que tengo urgente y atrasado")
+        summary_and_followup = parse_user_query("comentame dashboard y despues decime que sigue")
+        client_facing = parse_user_query("que me preocuparia de Cam y que le diria al cliente")
+
+        self.assertEqual(summary_and_recommend["intent"], "compound_query")
+        self.assertEqual(summary_and_recommend["subqueries"][0]["intent"], "get_operational_summary")
+        self.assertEqual(summary_and_recommend["subqueries"][1]["intent"], "get_operational_recommendation")
+        self.assertEqual(temporal_and_friction["subqueries"][0]["intent"], "get_due_tasks_summary")
+        self.assertEqual(temporal_and_friction["subqueries"][1]["intent"], "get_followup_focus_summary")
+        self.assertEqual(urgent_and_overdue["subqueries"][0]["intent"], "get_today_priority_summary")
+        self.assertEqual(urgent_and_overdue["subqueries"][1]["intent"], "get_overdue_tasks_summary")
+        self.assertEqual(summary_and_followup["subqueries"][1]["intent"], "get_next_actions_summary")
+        self.assertEqual(client_facing["subqueries"][1]["intent"], "get_client_facing_summary")
+
     def test_parse_contextual_followups(self):
         projects = parse_user_query("y sus proyectos?")
         close_task = parse_user_query("cerrala")

@@ -37,6 +37,14 @@ AMBIGUOUS_TEMPORAL_TERMS = ("pronto", "mas adelante", "más adelante", "despues"
 
 def parse_user_query(query: str) -> dict:
     normalized = query.strip().lower()
+    return _parse_user_query_internal(normalized, allow_compound=True)
+
+
+def _parse_user_query_internal(normalized: str, *, allow_compound: bool) -> dict:
+    if allow_compound:
+        compound = _parse_compound_intents(normalized)
+        if compound:
+            return compound
 
     result = (
         _parse_creation_intents(normalized)
@@ -47,6 +55,64 @@ def parse_user_query(query: str) -> dict:
         or _parse_today_intents(normalized)
     )
     return result or {"intent": "unknown"}
+
+
+def _parse_compound_intents(normalized: str) -> dict | None:
+    connectors = (
+        " y despues decime ",
+        " y despuÃ©s decime ",
+        " y despues ",
+        " y despuÃ©s ",
+        " y decime ",
+        " y quÃ© ",
+        " y que ",
+        " pero ",
+        " y ",
+    )
+    prefixes = (
+        "decime ",
+        "comentame ",
+        "comentÃ¡me ",
+        "mostrame ",
+        "mostrÃ¡me ",
+    )
+
+    for connector in connectors:
+        if connector not in normalized:
+            continue
+        first_part, second_part = normalized.split(connector, 1)
+        first_part = first_part.strip(" ,.;")
+        second_part = second_part.strip(" ,.;")
+        for prefix in prefixes:
+            if second_part.startswith(prefix):
+                second_part = second_part.removeprefix(prefix).strip()
+                break
+
+        if second_part in {"urgente", "urgentes", "atrasado", "atrasados", "vencido", "vencidos"}:
+            if first_part.startswith("que tengo "):
+                second_part = f"que tengo {second_part}"
+            elif first_part.startswith("que esta ") or first_part.startswith("que estÃ¡ "):
+                second_part = f"que esta {second_part}"
+        elif second_part in {"bloqueado", "bloqueada", "bloqueados", "bloqueadas"}:
+            second_part = "que esta bloqueado"
+        elif second_part == "que sigue":
+            second_part = "y que sigue"
+
+        if not first_part or not second_part or first_part == second_part:
+            continue
+
+        first_query = _parse_user_query_internal(first_part, allow_compound=False)
+        second_query = _parse_user_query_internal(second_part, allow_compound=False)
+        if first_query.get("intent") == "unknown" or second_query.get("intent") == "unknown":
+            continue
+
+        return {
+            "intent": "compound_query",
+            "subqueries": [first_query, second_query],
+            "compound_parts": [first_part, second_part],
+        }
+
+    return None
 
 
 def _parse_creation_intents(normalized: str) -> dict | None:
@@ -151,8 +217,28 @@ def _parse_creation_intents(normalized: str) -> dict | None:
 
 
 def _parse_temporal_read_intents(normalized: str) -> dict | None:
-    if any(phrase in normalized for phrase in ["que vence hoy", "que vence ahora", "y que vence"]):
+    match = re.search(r"^que tengo hoy con (.+)$", normalized)
+    if match:
+        return {"intent": "get_due_tasks_summary", "time_scope": "today", "client_name": match.group(1).strip()}
+
+    match = re.search(r"^que tengo para manana con (.+)$", normalized)
+    if match:
+        return {"intent": "get_due_tasks_summary", "time_scope": "tomorrow", "client_name": match.group(1).strip()}
+
+    if any(phrase in normalized for phrase in ["que vence hoy", "que vence ahora"]):
         payload = {"intent": "get_due_tasks_summary", "time_scope": "today"}
+        if normalized.startswith("y "):
+            payload["entity_hint"] = "aca"
+        return payload
+
+    if any(phrase in normalized for phrase in ["que vence esta semana", "y que vence esta semana"]):
+        payload = {"intent": "get_due_tasks_summary", "time_scope": "this_week"}
+        if normalized.startswith("y "):
+            payload["entity_hint"] = "aca"
+        return payload
+
+    if any(phrase in normalized for phrase in ["que vence", "y que vence"]):
+        payload = {"intent": "get_due_tasks_summary", "time_scope": "due_items"}
         if normalized.startswith("y "):
             payload["entity_hint"] = "aca"
         return payload
@@ -389,6 +475,7 @@ def _parse_read_intents(normalized: str) -> dict | None:
         phrase in normalized
         for phrase in [
             "que le diria al cliente hoy",
+            "que le diria al cliente",
             "decimelo como para mandarselo al cliente",
             "quÃ© le dirÃ­a al cliente hoy",
         ]
@@ -450,6 +537,8 @@ def _parse_read_intents(normalized: str) -> dict | None:
         for phrase in [
             "que atacaria primero",
             "quÃ© atacarÃ­a primero",
+            "que haria primero",
+            "qué haría primero",
             "que me conviene empujar primero",
             "quÃ© me conviene empujar primero",
             "si tuvieras que elegir una sola cosa",
@@ -534,6 +623,8 @@ def _parse_read_intents(normalized: str) -> dict | None:
     if any(
         phrase in normalized
         for phrase in [
+            "comentame ",
+            "comentáme ",
             "comentame en que andamos con ",
             "comentame en qué andamos con ",
             "dame un resumen operativo de ",
@@ -546,7 +637,7 @@ def _parse_read_intents(normalized: str) -> dict | None:
         ]
     ):
         match = re.search(
-            r"(?:comentame en que andamos con|comentame en qué andamos con|dame un resumen operativo de|que me preocuparia de|que me preocuparía de|que esta pasando con|qué está pasando con|como estamos con|cómo estamos con)\s+(.+)$",
+            r"(?:comentame en que andamos con|comentame en qué andamos con|comentame|comentáme|dame un resumen operativo de|que me preocuparia de|que me preocuparía de|que esta pasando con|qué está pasando con|como estamos con|cómo estamos con)\s+(.+)$",
             normalized,
         )
         if match:
@@ -687,6 +778,7 @@ def _parse_read_intents(normalized: str) -> dict | None:
             "que deberia hacer hoy",
             "que hago hoy",
             "que tengo que hacer hoy",
+            "que tengo urgente",
         ]
     ):
         return {"intent": "get_today_priority_summary"}
@@ -834,6 +926,8 @@ def _parse_read_intents(normalized: str) -> dict | None:
 
     if normalized.startswith("resumime "):
         target = normalized.removeprefix("resumime ").strip()
+        if target and " y " not in target and not target.startswith(("el cliente ", "la tarea ", "el proyecto ", "lo ")) and len(target.split()) <= 2:
+            return {"intent": "get_operational_summary", "entity_hint": target}
         if target and not target.startswith(("el cliente ", "la tarea ", "el proyecto ", "lo ")):
             return {"intent": "get_task_summary", "task_name": target}
 

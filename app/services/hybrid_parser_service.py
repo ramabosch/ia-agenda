@@ -31,6 +31,7 @@ CLARIFICATION_INTENTS = {
 
 SUMMARY_INTENTS = {
     "get_operational_summary",
+    "compound_query",
 }
 
 

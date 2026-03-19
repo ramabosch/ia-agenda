@@ -48,6 +48,7 @@ from app.services.task_update_service import create_task_update
 
 
 REFERENCE_AWARE_INTENTS = {
+    "compound_query",
     "clarify_entity_reference",
     "get_operational_summary",
     "get_operational_friction_summary",
@@ -129,6 +130,11 @@ CONTINUITY_INTENTS = {
     "get_client_facing_summary",
 }
 
+UNSAFE_COMPOUND_INTENTS = CREATION_INTENTS | TASK_UPDATE_INTENTS | {
+    "add_task_update",
+    "add_task_update_by_name",
+}
+
 
 def build_response_from_query(
     parsed_query: dict,
@@ -136,6 +142,13 @@ def build_response_from_query(
     conversation_context: dict | None = None,
 ) -> str:
     intent = parsed_query.get("intent")
+    if intent == "compound_query":
+        return _handle_compound_query(
+            parsed_query,
+            user_query=user_query,
+            conversation_context=conversation_context,
+        )
+
     resolved_references = _resolve_if_needed(parsed_query, user_query, conversation_context=conversation_context)
 
     if intent == "clarify_entity_reference":
@@ -582,6 +595,87 @@ def _finalize_update_response(parsed_query: dict, resolved_references: dict, upd
     return f"Listo. Actualice la tarea '{result['task_title']}'. Cambio {field_labels.get(result['field'], result['field'])}: '{old_value}' -> '{new_value}'."
 
 
+def _handle_compound_query(
+    parsed_query: dict,
+    *,
+    user_query: str | None,
+    conversation_context: dict | None,
+) -> str:
+    subqueries = parsed_query.get("subqueries") or []
+    raw_parts = parsed_query.get("compound_parts") or []
+    current_context = conversation_context or {}
+    sections: list[str] = []
+    resolved_parts: list[str] = []
+    degraded_parts: list[str] = []
+    reused_snapshot = False
+    partial_clarification = False
+
+    for index, subquery in enumerate(subqueries[:2]):
+        raw_part = raw_parts[index] if index < len(raw_parts) else None
+        sub_intent = subquery.get("intent")
+        label = "Primero" if index == 0 else "Despues"
+
+        if sub_intent in UNSAFE_COMPOUND_INTENTS:
+            degraded_parts.append(sub_intent or "unknown")
+            sections.append(
+                f"{label}:\nNo ejecute la parte de accion dentro de una consulta compuesta. "
+                "Si queres hacer ese cambio, mandamelo separado."
+            )
+            continue
+
+        snapshot_before = bool((current_context or {}).get("response_snapshot"))
+        response = build_response_from_query(
+            subquery,
+            user_query=raw_part,
+            conversation_context=current_context,
+        )
+        next_context = subquery.get("_conversation_context") or current_context
+        if index > 0 and snapshot_before:
+            reused_snapshot = True
+        current_context = next_context
+
+        if _is_degraded_compound_part(subquery, response):
+            degraded_parts.append(sub_intent or "unknown")
+        else:
+            resolved_parts.append(sub_intent or "unknown")
+        if subquery.get("_clarification_needed"):
+            partial_clarification = True
+        sections.append(f"{label}:\n{response}")
+
+    parsed_query["_conversation_context"] = current_context if current_context else _base_conversation_context(parsed_query, "none")
+    parsed_query["_compound_primary_intent"] = subqueries[0].get("intent") if subqueries else None
+    parsed_query["_compound_secondary_intent"] = subqueries[1].get("intent") if len(subqueries) > 1 else None
+    parsed_query["_compound_resolved_parts"] = resolved_parts
+    parsed_query["_compound_degraded_parts"] = degraded_parts
+    parsed_query["_compound_reused_snapshot"] = reused_snapshot
+    parsed_query["_compound_partial_clarification"] = partial_clarification
+    return "\n\n".join(sections)
+
+
+def _is_degraded_compound_part(parsed_query: dict, response: str) -> bool:
+    if parsed_query.get("_clarification_needed"):
+        return True
+    if parsed_query.get("_security_blocked"):
+        return True
+    if parsed_query.get("_adaptive_degraded"):
+        return True
+    if parsed_query.get("_temporal_degraded"):
+        return True
+
+    lowered = response.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "no pude",
+            "no tengo",
+            "necesito",
+            "aclares",
+            "decime el proyecto",
+            "decime el cliente",
+        )
+    )
+
+
 def _handle_creation_intent(
     parsed_query: dict,
     resolved_references: dict,
@@ -837,6 +931,10 @@ def _handle_temporal_intent(
         if response:
             return response
 
+    scoped_response = _build_resolved_temporal_response(parsed_query, resolved_references)
+    if scoped_response:
+        return scoped_response
+
     intent = parsed_query.get("intent")
     time_scope = parsed_query.get("time_scope")
     temporal_focus = parsed_query.get("temporal_focus")
@@ -895,6 +993,50 @@ def _build_contextual_temporal_response(parsed_query: dict, context: dict) -> st
     parsed_query["_conversation_context"] = context
     _attach_temporal_debug(parsed_query, snapshot, scope_override=f"contextual_{scope}", interpretation=time_scope)
     return _format_temporal_summary(snapshot, scope_label=_context_scope_name(context, scope))
+
+
+def _build_resolved_temporal_response(parsed_query: dict, resolved_references: dict) -> str | None:
+    if resolved_references.get("clarification_needed") or resolved_references.get("security_blocked"):
+        return None
+
+    scope = resolved_references.get("scope")
+    if scope == "task" and resolved_references.get("task", {}).get("resolved", {}).get("id"):
+        summary = get_task_operational_summary(resolved_references["task"]["resolved"]["id"])
+        if not summary:
+            return None
+        tasks = [_summary_to_task_like(summary)]
+        scope_label = resolved_references["task"]["resolved"]["name"]
+    elif scope == "project" and resolved_references.get("project", {}).get("resolved", {}).get("id"):
+        tasks = get_tasks_by_project_id(resolved_references["project"]["resolved"]["id"])
+        scope_label = resolved_references["project"]["resolved"]["name"]
+    elif scope == "client" and resolved_references.get("client", {}).get("resolved", {}).get("id"):
+        tasks = get_tasks_by_client_id(resolved_references["client"]["resolved"]["id"])
+        scope_label = resolved_references["client"]["resolved"]["name"]
+    else:
+        return None
+
+    intent = parsed_query.get("intent")
+    parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, scope)
+    if resolved_references.get(scope, {}).get("resolved"):
+        parsed_query["_conversation_context"][scope] = {
+            "id": resolved_references[scope]["resolved"]["id"],
+            "name": resolved_references[scope]["resolved"]["name"],
+        }
+
+    if intent == "get_missing_due_date_summary":
+        snapshot = build_missing_due_date_snapshot_from_tasks(tasks, today=date.today())
+        _attach_temporal_debug(parsed_query, snapshot, scope_override=f"contextual_{scope}", interpretation="missing_due_date")
+        return _format_missing_due_date_summary(snapshot, scope_label=scope_label)
+
+    time_scope = "overdue" if intent == "get_overdue_tasks_summary" else (parsed_query.get("time_scope") or "due_items")
+    snapshot = build_temporal_task_snapshot_from_tasks(
+        tasks,
+        time_scope=time_scope,
+        today=date.today(),
+        temporal_focus=parsed_query.get("temporal_focus"),
+    )
+    _attach_temporal_debug(parsed_query, snapshot, scope_override=f"contextual_{scope}", interpretation=time_scope)
+    return _format_temporal_summary(snapshot, scope_label=scope_label)
 
 
 def _summary_to_task_like(summary: dict):
@@ -1485,6 +1627,8 @@ def _preferred_contextual_recommendation_scope(user_query: str | None, context: 
             "quÃ© deberÃ­a priorizar acÃ¡",
             "que atacaria primero",
             "quÃ© atacarÃ­a primero",
+            "que haria primero",
+            "qué haría primero",
         )
     ):
         return None
@@ -2459,7 +2603,7 @@ def _format_temporal_summary(snapshot: dict, scope_label: str | None = None) -> 
     lines = [f"Esto es lo que {label}{scope_prefix}:"]
     for item in items[:8]:
         lines.append(
-            f"- {item['title']} | Vence: {item['due_date'] or 'Sin fecha'} | Cliente: {item['client_name']} | Proyecto: {item['project_name']}"
+            f"- {item.get('title', 'item')} | Vence: {item.get('due_date') or 'Sin fecha'} | Cliente: {item.get('client_name', 'Desconocido')} | Proyecto: {item.get('project_name', 'Sin proyecto')}"
         )
     return "\n".join(lines)
 
