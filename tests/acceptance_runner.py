@@ -911,6 +911,35 @@ DEFAULT_SCENARIOS = [
         ],
     ),
     Scenario(
+        scenario_id="NAT-001",
+        title="Phrasing natural libre con resumen y recomendacion",
+        category="continuity",
+        severity="medium",
+        tags=["daily", "continuity", "natural_language"],
+        turns=[
+            ScenarioTurn(
+                "que onda cam",
+                {
+                    "should_not_error": True,
+                    "should_have_response": True,
+                    "should_have_intent": "get_operational_summary",
+                    "should_have_scope": "client",
+                    "should_contain_any": ["Resumen del cliente Cam", "Pendientes importantes"],
+                },
+            ),
+            ScenarioTurn(
+                "y ahora que",
+                {
+                    "should_not_error": True,
+                    "should_have_response": True,
+                    "should_have_intent": "get_operational_recommendation",
+                    "should_have_context_reuse": True,
+                    "should_contain_any": ["Lo que yo haria con Cam", "Recomendacion principal"],
+                },
+            ),
+        ],
+    ),
+    Scenario(
         scenario_id="TMP-001",
         title="Temporalidad diaria real",
         category="temporal",

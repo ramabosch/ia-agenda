@@ -140,6 +140,60 @@ class CreationBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(parsed.get("_creation_target_scope"), "project")
 
+    def test_create_task_with_loose_project_phrase_requires_title_but_keeps_target(self):
+        client = make_client(1, "CAM")
+        project = make_project(10, "Automatizacion", client)
+        parsed = parse_user_query("sumame una tarea en automatizacion de cam")
+
+        with patch("app.services.reference_resolver.get_all_clients", return_value=[client]), patch(
+            "app.services.reference_resolver.get_all_projects",
+            return_value=[project],
+        ), patch(
+            "app.services.query_response_service.create_task_conversational",
+        ) as create_mock:
+            response = build_response_from_query(
+                parsed,
+                user_query="sumame una tarea en automatizacion de cam",
+                conversation_context={},
+            )
+
+        create_mock.assert_not_called()
+        self.assertEqual(parsed["project_name"], "automatizacion")
+        self.assertEqual(parsed["client_name"], "cam")
+        self.assertIn("necesito el nombre o contenido de la tarea", response.lower())
+
+    def test_note_like_task_phrase_uses_current_project_context(self):
+        client = make_client(1, "CAM")
+        project = make_project(10, "Automatizacion", client)
+        create_result = {
+            "created": True,
+            "task_id": 206,
+            "task_title": "revisar indicadores",
+            "project_id": project.id,
+            "priority": "media",
+            "next_action": None,
+            "last_note": None,
+        }
+        parsed = parse_user_query("anota que hay que revisar indicadores")
+        context = {
+            "_isolated": True,
+            "scope": "project",
+            "project": {"id": project.id, "name": project.name},
+            "client": {"id": client.id, "name": client.name},
+        }
+
+        with patch("app.services.query_response_service.create_task_conversational", return_value=create_result) as create_mock:
+            response = build_response_from_query(
+                parsed,
+                user_query="anota que hay que revisar indicadores",
+                conversation_context=context,
+            )
+
+        create_mock.assert_called_once()
+        self.assertEqual(create_mock.call_args.args[1], "revisar indicadores")
+        self.assertIn("revisar indicadores", response.lower())
+        self.assertTrue("automatizacion" in response.lower() or "automatización" in response.lower())
+
     def test_create_high_priority_task(self):
         client = make_client(1, "CAM")
         project = make_project(10, "Dashboard", client)

@@ -1,4 +1,5 @@
 import re
+import unicodedata
 
 
 STATUS_MAP = {
@@ -37,8 +38,14 @@ AMBIGUOUS_TEMPORAL_TERMS = ("pronto", "mas adelante", "más adelante", "despues"
 
 
 def parse_user_query(query: str) -> dict:
-    normalized = query.strip().lower()
+    normalized = _normalize_user_query(query)
     return _parse_user_query_internal(normalized, allow_compound=True)
+
+
+def _normalize_user_query(query: str) -> str:
+    base_text = (query or "").strip().lower()
+    normalized = unicodedata.normalize("NFKD", base_text)
+    return "".join(char for char in normalized if not unicodedata.combining(char))
 
 
 def _parse_user_query_internal(normalized: str, *, allow_compound: bool) -> dict:
@@ -363,6 +370,21 @@ def _parse_creation_intents(normalized: str) -> dict | None:
         }
         return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
 
+    match = re.search(
+        rf"^{create_task_prefix}\s+tarea\s+en\s+(.+?)\s+de\s+(.+?)(?:\s+para\s+(.+)|\s*:\s*(.+))?$",
+        stripped_normalized,
+    )
+    if match:
+        payload = {
+            "intent": "create_task",
+            "project_name": match.group(1).strip(),
+            "client_name": match.group(2).strip(),
+            "task_name": ((match.group(3) or match.group(4) or "").strip() or None),
+            "new_priority": priority,
+            "expected_scope": "project",
+        }
+        return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
+
     match = re.search(rf"^{create_task_prefix}\s+tarea\s+en\s+(.+?)(?:\s+para\s+(.+)|\s*:\s*(.+))?$", stripped_normalized)
     if match:
         task_title = (match.group(2) or match.group(3) or "").strip() or None
@@ -428,6 +450,17 @@ def _parse_creation_intents(normalized: str) -> dict | None:
 
     if any(phrase in normalized for phrase in ["converti esto en tarea", "convertí esto en tarea", "convierte esto en tarea"]):
         return _augment_targeting_payload(_apply_temporal_fields({"intent": "create_task", "task_name": "esto"}, due_hint, time_scope))
+
+    match = re.search(r"^(?:anota|anotame)\s+que\s+(?:hay que\s+)?(.+)$", stripped_normalized)
+    if match:
+        payload = {
+            "intent": "create_task",
+            "project_name": "este proyecto",
+            "task_name": match.group(1).strip(),
+            "new_priority": priority,
+            "expected_scope": "project",
+        }
+        return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
 
     match = re.search(rf"^(?:dej(?:a|á)|{create_followup_prefix})\s+follow-?up(?:\s+para\s+(.+))?$", stripped_normalized)
     if match:
@@ -751,6 +784,22 @@ def _parse_read_intents(normalized: str) -> dict | None:
             }
         )
 
+    match = re.search(r"^que\s+onda\s+(.+?)\??$", normalized)
+    if match:
+        return _augment_targeting_payload({"intent": "get_operational_summary", "entity_hint": match.group(1).strip()})
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "como venimos con esto",
+            "como venimos aca",
+            "como viene esto",
+            "que onda con esto",
+            "que onda aca",
+        ]
+    ):
+        return {"intent": "get_operational_summary", "entity_hint": "aca"}
+
     match = re.search(r"^resumime\s+el\s+(.+)$", normalized)
     if match:
         return _augment_targeting_payload({"intent": "get_operational_summary", "entity_hint": match.group(1).strip()})
@@ -960,6 +1009,15 @@ def _parse_read_intents(normalized: str) -> dict | None:
             "quÃ© harÃ­as ahora",
         ]
     ):
+        return {"intent": "get_operational_recommendation", "entity_hint": "aca"}
+
+    if normalized in {
+        "y ahora que",
+        "que conviene",
+        "que deberia hacer primero",
+        "si fueras yo, que harias",
+        "si fueras yo que harias",
+    }:
         return {"intent": "get_operational_recommendation", "entity_hint": "aca"}
 
     if any(

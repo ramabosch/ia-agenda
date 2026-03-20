@@ -227,6 +227,69 @@ class OperationalSummaryBehaviorTests(unittest.TestCase):
         self.assertIn("resumen del cliente rosario capilar", response.lower())
         self.assertEqual(parsed.get("_summary_scope"), "client")
 
+    def test_loose_client_summary_phrase_prioritizes_named_scope(self):
+        client = make_client(1, "CAM")
+        project = make_project(10, "Dashboard", client)
+        task = make_task(100, "Revision anual", project, priority="alta")
+
+        with patch("app.services.reference_resolver.get_all_clients", return_value=[client]), patch(
+            "app.services.query_response_service.get_projects_by_client_id",
+            return_value=[project],
+        ), patch(
+            "app.services.query_response_service.get_tasks_by_client_id",
+            return_value=[task],
+        ):
+            parsed = parse_user_query("que onda cam")
+            response = build_response_from_query(parsed, user_query="que onda cam", conversation_context={})
+
+        self.assertIn("resumen del cliente cam", response.lower())
+        self.assertEqual(parsed.get("_summary_scope"), "client")
+
+    def test_contextual_loose_summary_phrase_uses_safe_context(self):
+        client = make_client(1, "CAM")
+        project = make_project(10, "Dashboard", client)
+        context = {
+            "_isolated": True,
+            "scope": "project",
+            "project": {"id": project.id, "name": project.name},
+            "client": {"id": client.id, "name": client.name},
+        }
+        advanced = {
+            "scope": "project",
+            "entity_name": "Dashboard",
+            "client_name": "CAM",
+            "status_overview": "Hay una tarea abierta.",
+            "important_pending": [],
+            "risk_items": [],
+            "attention_items": [],
+            "next_steps": [],
+            "recommendation": "Definir una proxima accion clara.",
+            "heuristic": ["resumen arriba"],
+        }
+        summary = {
+            "project_id": 10,
+            "project_name": "Dashboard",
+            "client_id": 1,
+            "client_name": "CAM",
+            "status": "activo",
+            "description": None,
+            "total_tasks": 1,
+            "open_tasks": 1,
+            "done_tasks": 0,
+            "blocked_tasks": 0,
+            "in_progress_tasks": 0,
+        }
+
+        with patch("app.services.query_response_service.get_project_operational_summary", return_value=summary), patch(
+            "app.services.query_response_service.get_project_advanced_summary",
+            return_value=advanced,
+        ):
+            parsed = parse_user_query("como venimos con esto")
+            response = build_response_from_query(parsed, user_query="como venimos con esto", conversation_context=context)
+
+        self.assertIn("resumen del proyecto dashboard", response.lower())
+        self.assertEqual(parsed.get("_summary_scope"), "contextual_project")
+
     def test_ambiguous_operational_summary_keeps_clarification(self):
         client = make_client(1, "CAM")
         project = make_project(10, "Dashboard", client)
