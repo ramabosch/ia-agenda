@@ -67,6 +67,7 @@ class AcceptanceRunnerTests(unittest.TestCase):
             self.assertTrue(markdown_path.exists())
             self.assertIn("Acceptance Suite Report", render_markdown_report(report))
             self.assertIn("by_category", report["summary"])
+            self.assertIn("gate_status", report["summary"])
 
     def test_runner_can_filter_by_severity(self):
         scenarios = [
@@ -92,6 +93,32 @@ class AcceptanceRunnerTests(unittest.TestCase):
 
         self.assertEqual(report["scenario_count"], 1)
         self.assertEqual(report["results"][0]["id"], "REC-T1")
+
+    def test_runner_can_filter_smoke_critical_tag(self):
+        scenarios = [
+            Scenario(
+                scenario_id="SMK-1",
+                title="Smoke",
+                category="continuity",
+                severity="critical",
+                tags=["smoke_critical"],
+                turns=[ScenarioTurn("comentame en que andamos con Cam", {"should_not_error": True, "should_have_response": True})],
+            ),
+            Scenario(
+                scenario_id="SMK-2",
+                title="No smoke",
+                category="temporal",
+                severity="critical",
+                tags=["temporal"],
+                turns=[ScenarioTurn("que vence hoy", {"should_not_error": True, "should_have_response": True})],
+            ),
+        ]
+
+        report = run_acceptance_suite(scenarios=scenarios, tag_filters=["smoke_critical"])
+
+        self.assertEqual(report["scenario_count"], 1)
+        self.assertEqual(report["results"][0]["id"], "SMK-1")
+        self.assertEqual(report["summary"]["gate_status"], "APTO")
 
 
 if __name__ == "__main__":

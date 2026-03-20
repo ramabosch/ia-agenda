@@ -14,7 +14,13 @@ from tests.acceptance_runner import render_markdown_report, run_acceptance_suite
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run conversational acceptance scenarios against Agenda AI.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run conversational acceptance scenarios against Agenda AI. "
+            "Use the full suite by default, or filter by category/tag/severity, "
+            "or run the predefined smoke critical suite."
+        )
+    )
     parser.add_argument(
         "--output-dir",
         default=str(REPO_ROOT / "artifacts" / "acceptance"),
@@ -23,13 +29,22 @@ def main() -> int:
     parser.add_argument("--category", action="append", default=[], help="Filter by category. Repeatable.")
     parser.add_argument("--severity", action="append", default=[], help="Filter by severity. Repeatable.")
     parser.add_argument("--tag", action="append", default=[], help="Filter by tag. Repeatable.")
+    parser.add_argument(
+        "--smoke-critical",
+        action="store_true",
+        help="Run the predefined smoke critical suite (tag: smoke_critical).",
+    )
     args = parser.parse_args()
+
+    tag_filters = list(args.tag)
+    if args.smoke_critical and "smoke_critical" not in tag_filters:
+        tag_filters.append("smoke_critical")
 
     report = run_acceptance_suite(
         output_dir=args.output_dir,
         category_filters=args.category,
         severity_filters=args.severity,
-        tag_filters=args.tag,
+        tag_filters=tag_filters,
     )
     summary = report.get("summary", {})
 
@@ -40,6 +55,7 @@ def main() -> int:
                 "pass": summary.get("pass", 0),
                 "fail": summary.get("fail", 0),
                 "partial": summary.get("partial", 0),
+                "gate_status": summary.get("gate_status"),
                 "by_category": summary.get("by_category", {}),
                 "by_severity": summary.get("by_severity", {}),
                 "failing_scenarios": summary.get("failing_scenarios", []),
