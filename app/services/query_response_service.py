@@ -1,9 +1,16 @@
-from datetime import date
+from datetime import date, datetime
 
 from app.services.client_service import get_active_clients
 from app.services.conversation_service import (
     get_conversations_for_today,
     get_last_conversation,
+)
+from app.services.agenda_service import (
+    create_agenda_item_conversational,
+    get_agenda_items_between_dates,
+    get_agenda_items_for_date,
+    resolve_agenda_date_hint,
+    resolve_agenda_time_hint,
 )
 from app.services.project_service import (
     add_project_note_conversational,
@@ -134,6 +141,14 @@ AUDIT_INTENTS = {
     "get_audit_trace_summary",
 }
 
+AGENDA_CREATION_INTENTS = {
+    "create_agenda_item",
+}
+
+AGENDA_QUERY_INTENTS = {
+    "get_agenda_items_summary",
+}
+
 UNSAFE_COMPOUND_INTENTS = CREATION_INTENTS | TASK_UPDATE_INTENTS | {
     "add_task_update",
     "add_task_update_by_name",
@@ -149,6 +164,16 @@ def build_response_from_query(
     intent = parsed_query.get("intent")
     if intent == "compound_query":
         return _handle_compound_query(
+            parsed_query,
+            user_query=user_query,
+            conversation_context=conversation_context,
+        )
+
+    if intent in AGENDA_CREATION_INTENTS:
+        return _handle_agenda_creation_intent(parsed_query, conversation_context=conversation_context)
+
+    if intent in AGENDA_QUERY_INTENTS:
+        return _handle_agenda_query_intent(
             parsed_query,
             user_query=user_query,
             conversation_context=conversation_context,
@@ -543,6 +568,234 @@ def build_response_from_query(
         "- resumime onboarding\n"
         "- ponelo en alta"
     )
+
+
+def _handle_agenda_creation_intent(parsed_query: dict, *, conversation_context: dict | None) -> str:
+    title = (parsed_query.get("agenda_title") or "").strip()
+    if not title:
+        return _abort_with_context(parsed_query, "Necesito el contenido del evento o recordatorio para agendarlo.")
+
+    date_resolution = resolve_agenda_date_hint(parsed_query.get("agenda_date_hint"), today=date.today())
+    if not date_resolution.get("resolved"):
+        return _abort_with_context(parsed_query, "Necesito una fecha clara para agendar eso con seguridad.")
+    if date_resolution.get("scope") == "this_week":
+        return _abort_with_context(parsed_query, "Puedo guardar agenda personal con un dia concreto. Decime que dia de la semana queres usar.")
+
+    time_hint = parsed_query.get("agenda_time_hint")
+    time_resolution = resolve_agenda_time_hint(time_hint)
+    if time_hint and not time_resolution.get("resolved"):
+        return _abort_with_context(parsed_query, "No pude interpretar la hora con suficiente claridad.")
+
+    kind = parsed_query.get("agenda_kind") or "event"
+    result = create_agenda_item_conversational(
+        title,
+        scheduled_date=date_resolution["target_date"],
+        scheduled_time=time_resolution.get("scheduled_time"),
+        kind=kind,
+    )
+    if not result.get("created"):
+        return _abort_with_context(parsed_query, "No pude guardar ese item de agenda.")
+
+    parsed_query["_conversation_context"] = {
+        **_base_conversation_context(parsed_query, "agenda"),
+        "agenda_context": {
+            "query_scope": "created_item",
+            "anchor_date": result["scheduled_date"].isoformat(),
+            "anchor_time": result["scheduled_time"].strftime("%H:%M") if result.get("scheduled_time") else None,
+            "kind": result["kind"],
+            "title": result["title"],
+        },
+    }
+
+    kind_label = "recordatorio" if result["kind"] == "reminder" else "evento"
+    parts = [
+        f"Listo: guarde el {kind_label} '{result['title']}'.",
+        f"Fecha: {result['scheduled_date'].isoformat()}.",
+    ]
+    if result.get("scheduled_time"):
+        parts.append(f"Hora: {result['scheduled_time'].strftime('%H:%M')}.")
+    response = " ".join(parts)
+    _set_audit_trace(
+        parsed_query,
+        user_query=parsed_query.get("_last_user_query"),
+        response=response,
+        action_status="executed",
+        action_type=f"agenda_{result['kind']}",
+        affected_entity={"scope": "agenda", "id": result["agenda_item_id"], "name": result["title"]},
+    )
+    return response
+
+
+def _handle_agenda_query_intent(
+    parsed_query: dict,
+    *,
+    user_query: str | None,
+    conversation_context: dict | None,
+) -> str:
+    context = conversation_context or {}
+    query_scope = parsed_query.get("agenda_query_scope") or "today"
+    today = date.today()
+    now = datetime.now()
+
+    if query_scope == "after_current":
+        agenda_context = context.get("agenda_context") if isinstance(context, dict) and context.get("_isolated") else {}
+        anchor_date = agenda_context.get("anchor_date") if isinstance(agenda_context, dict) else None
+        anchor_time = agenda_context.get("anchor_time") if isinstance(agenda_context, dict) else None
+        target_date = date.fromisoformat(anchor_date) if anchor_date else today
+        items = get_agenda_items_for_date(target_date)
+        after_time = resolve_agenda_time_hint(anchor_time).get("scheduled_time") if anchor_time else now.time().replace(second=0, microsecond=0)
+        filtered = [item for item in items if item.scheduled_time and item.scheduled_time > after_time]
+        parsed_query["_conversation_context"] = _build_agenda_context(
+            parsed_query,
+            query_scope="after_current",
+            target_date=target_date,
+            anchor_time=after_time.strftime("%H:%M"),
+        )
+        return _format_agenda_summary_response(
+            parsed_query,
+            filtered,
+            heading=f"Esto te queda despues de las {after_time.strftime('%H:%M')}:",
+            empty_message="No te queda nada mas agendado despues de esa hora.",
+        )
+
+    date_hint = parsed_query.get("agenda_date_hint") or "hoy"
+    date_resolution = resolve_agenda_date_hint(date_hint, today=today)
+    if not date_resolution.get("resolved"):
+        return _abort_with_context(parsed_query, "No pude ubicar esa fecha en la agenda con suficiente claridad.")
+
+    if query_scope == "this_week":
+        items = get_agenda_items_between_dates(date_resolution["start_date"], date_resolution["end_date"])
+        parsed_query["_conversation_context"] = _build_agenda_context(
+            parsed_query,
+            query_scope="this_week",
+            target_date=date_resolution["start_date"],
+            anchor_time=None,
+        )
+        return _format_agenda_summary_response(
+            parsed_query,
+            items,
+            heading="Esto tenes en agenda esta semana:",
+            empty_message="No tenes nada agendado para esta semana.",
+            include_date=True,
+        )
+
+    target_date = date_resolution["target_date"]
+    items = get_agenda_items_for_date(target_date)
+
+    if query_scope == "rest_of_day":
+        filtered = [item for item in items if item.scheduled_time is None or item.scheduled_time >= now.time()]
+        parsed_query["_conversation_context"] = _build_agenda_context(
+            parsed_query,
+            query_scope="rest_of_day",
+            target_date=target_date,
+            anchor_time=now.strftime("%H:%M"),
+        )
+        return _format_agenda_summary_response(
+            parsed_query,
+            filtered,
+            heading="Esto te queda del dia:",
+            empty_message="No te queda nada mas en agenda para hoy.",
+        )
+
+    if query_scope == "at_time":
+        time_resolution = resolve_agenda_time_hint(parsed_query.get("agenda_time_hint"))
+        if not time_resolution.get("resolved") or not time_resolution.get("scheduled_time"):
+            return _abort_with_context(parsed_query, "Necesito una hora clara para revisar la agenda en ese momento.")
+        target_time = time_resolution["scheduled_time"]
+        filtered = [item for item in items if item.scheduled_time == target_time]
+        parsed_query["_conversation_context"] = _build_agenda_context(
+            parsed_query,
+            query_scope="at_time",
+            target_date=target_date,
+            anchor_time=target_time.strftime("%H:%M"),
+        )
+        return _format_agenda_summary_response(
+            parsed_query,
+            filtered,
+            heading=f"A las {target_time.strftime('%H:%M')} tenes esto:",
+            empty_message=f"No tenes nada agendado a las {target_time.strftime('%H:%M')}.",
+        )
+
+    parsed_query["_conversation_context"] = _build_agenda_context(
+        parsed_query,
+        query_scope=query_scope,
+        target_date=target_date,
+        anchor_time=None,
+    )
+    if parsed_query.get("agenda_boolean_query"):
+        if items:
+            return _format_agenda_summary_response(
+                parsed_query,
+                items,
+                heading=f"Si, para {date_resolution['label']} tenes esto:",
+                empty_message=f"No, para {date_resolution['label']} no tenes nada agendado.",
+            )
+        return _format_agenda_summary_response(
+            parsed_query,
+            [],
+            heading=f"Si, para {date_resolution['label']} tenes esto:",
+            empty_message=f"No, para {date_resolution['label']} no tenes nada agendado.",
+        )
+
+    heading = {
+        "today": "Esto tenes en agenda para hoy:",
+        "tomorrow": "Esto tenes en agenda para mañana:",
+    }.get(query_scope, "Esto tenes en agenda:")
+    empty_message = {
+        "today": "No tenes nada agendado para hoy.",
+        "tomorrow": "No tenes nada agendado para mañana.",
+    }.get(query_scope, "No encontre nada agendado para ese dia.")
+    return _format_agenda_summary_response(parsed_query, items, heading=heading, empty_message=empty_message)
+
+
+def _build_agenda_context(parsed_query: dict, *, query_scope: str, target_date: date, anchor_time: str | None) -> dict:
+    return {
+        **_base_conversation_context(parsed_query, "agenda"),
+        "agenda_context": {
+            "query_scope": query_scope,
+            "anchor_date": target_date.isoformat(),
+            "anchor_time": anchor_time,
+        },
+    }
+
+
+def _format_agenda_summary_response(
+    parsed_query: dict,
+    items: list,
+    *,
+    heading: str,
+    empty_message: str,
+    include_date: bool = False,
+) -> str:
+    if not items:
+        response = empty_message
+        _set_audit_trace(
+            parsed_query,
+            user_query=parsed_query.get("_last_user_query"),
+            response=response,
+            action_status="informational",
+            action_type="agenda_query",
+        )
+        return response
+
+    lines = [heading]
+    for item in items:
+        time_label = item.scheduled_time.strftime("%H:%M") if item.scheduled_time else "Sin hora"
+        kind_label = "Recordatorio" if getattr(item, "kind", "event") == "reminder" else "Evento"
+        if include_date:
+            lines.append(f"- {item.scheduled_date.isoformat()} | {time_label} | {kind_label} | {item.title}")
+        else:
+            lines.append(f"- {time_label} | {kind_label} | {item.title}")
+
+    response = "\n".join(lines)
+    _set_audit_trace(
+        parsed_query,
+        user_query=parsed_query.get("_last_user_query"),
+        response=response,
+        action_status="informational",
+        action_type="agenda_query",
+    )
+    return response
 
 
 def get_projects_for_client(client_id: int) -> list[dict]:
@@ -1596,6 +1849,16 @@ def _handle_operational_recommendation_intent(
         if contextual_response:
             return contextual_response
 
+    if (
+        parsed_query.get("entity_hint") == "aca"
+        and not contextual_scope
+        and not any(resolved_references.get(scope, {}).get("resolved") for scope in ("task", "project", "client"))
+    ):
+        return _abort_with_context(
+            parsed_query,
+            _safe_context_message("recomendar qué haría ahora", "Primero decime el cliente, proyecto o tarea exacta."),
+        )
+
     if resolved_references.get("security_blocked"):
         return _abort_with_context(
             parsed_query,
@@ -1674,6 +1937,9 @@ def _preferred_contextual_recommendation_scope(user_query: str | None, context: 
         for marker in (
             "que haria ahora",
             "quÃ© harÃ­as ahora",
+            "que harias ahora",
+            "que me recomendarias hacer ahora",
+            "que me recomendarías hacer ahora",
             "que priorizarias aca",
             "quÃ© priorizarÃ­as acÃ¡",
             "que priorizarias en este proyecto",
@@ -3419,16 +3685,120 @@ def _get_recent_audit_trace(conversation_context: dict | None) -> dict | None:
     return None
 
 
+def _friendly_audit_entity_name(trace: dict) -> str | None:
+    affected = trace.get("affected_entity") or {}
+    if affected.get("name"):
+        return affected["name"]
+
+    resolved = trace.get("resolved_entities") or {}
+    for scope in ("task", "project", "client"):
+        item = resolved.get(scope) or {}
+        if item.get("name"):
+            return item["name"]
+    return None
+
+
+def _friendly_audit_summary(trace: dict) -> str:
+    intent = trace.get("intent")
+    entity_name = _friendly_audit_entity_name(trace)
+
+    if intent == "get_operational_summary":
+        if entity_name:
+            return f"Recien te resumi el estado de {entity_name}."
+        return "Recien te resumi el estado general."
+    if intent == "get_followup_focus_summary":
+        if entity_name:
+            return f"Recien te marque lo que mas me preocuparia de {entity_name}."
+        return "Recien te marque el foco de preocupacion principal."
+    if intent == "get_operational_recommendation":
+        if entity_name:
+            return f"Recien te recomende por donde avanzaria con {entity_name}."
+        return "Recien te recomende cual seria la mejor jugada ahora."
+    if intent == "get_agenda_items_summary":
+        return "Recien te mostre tu agenda personal."
+    if intent == "get_due_tasks_summary":
+        return "Recien te mostre los vencimientos mas relevantes."
+    if intent == "get_overdue_tasks_summary":
+        return "Recien te mostre lo que quedo atrasado."
+    if intent == "get_audit_trace_summary":
+        return "Recien repase lo ultimo que hice en la conversacion."
+    return ""
+
+
+def _friendly_audit_action_label(trace: dict) -> str:
+    action_type = trace.get("action_type") or ""
+    affected = trace.get("affected_entity") or {}
+    affected_name = affected.get("name")
+
+    if action_type in {"create_task", "create_followup"} and affected_name:
+        return f"Recien agregue la tarea nueva '{affected_name}'."
+    if action_type in {"agenda_event", "agenda_reminder"} and affected_name:
+        return f"Recien guarde '{affected_name}' en tu agenda."
+    if action_type == "description" and affected_name:
+        return f"Recien actualice el proyecto '{affected_name}'."
+    if action_type == "status" and affected_name:
+        return f"Recien actualice la tarea '{affected_name}'."
+    if action_type == "priority" and affected_name:
+        return f"Recien cambie la prioridad de '{affected_name}'."
+    if action_type == "next_action" and affected_name:
+        return f"Recien deje la proxima accion de '{affected_name}'."
+    if action_type == "last_note" and affected_name:
+        return f"Recien deje una nota en '{affected_name}'."
+    if affected_name:
+        return f"Recien hice un cambio sobre '{affected_name}'."
+    return "Recien ejecute un cambio operativo."
+
+
+def _friendly_audit_understood_label(trace: dict) -> str:
+    intent = trace.get("intent")
+    entity_name = _friendly_audit_entity_name(trace)
+
+    if intent == "get_operational_summary":
+        target = f"sobre {entity_name}" if entity_name else "sobre ese tema"
+        return f"Entendi que querias un resumen operativo {target}."
+    if intent == "get_followup_focus_summary":
+        target = f"de {entity_name}" if entity_name else "de ese frente"
+        return f"Entendi que querias el foco de preocupacion {target}."
+    if intent == "get_operational_recommendation":
+        target = f"con {entity_name}" if entity_name else "en este contexto"
+        return f"Entendi que querias una recomendacion operativa {target}."
+    if intent in {"create_task", "create_followup"}:
+        return "Entendi que querias crear trabajo nuevo."
+    if intent == "create_agenda_item":
+        return "Entendi que querias guardar un evento o recordatorio personal."
+    if intent == "get_agenda_items_summary":
+        return "Entendi que querias revisar tu agenda personal."
+    if intent == "get_due_tasks_summary":
+        return "Entendi que querias ver vencimientos."
+    if intent == "get_overdue_tasks_summary":
+        return "Entendi que querias ver que quedo atrasado."
+    return "Entendi el pedido y lo baje a una accion o lectura operativa concreta."
+
+
 def _format_audit_recent(trace: dict) -> str:
-    action_type = trace.get("action_type") or "consulta"
     action_status = trace.get("action_status") or "informational"
     if action_status == "executed":
-        return f"Recien respondi y ademas hice esto: ejecute '{action_type}'. {trace.get('summary')}"
+        base = _friendly_audit_action_label(trace)
+        summary = trace.get("summary") or ""
+        return f"{base} {summary}".strip()
     if action_status == "blocked":
-        return f"Recien respondi sin ejecutar cambios. Lo frene por {trace.get('reason') or 'seguridad'}. {trace.get('summary')}"
+        return (
+            f"Recién te respondí sin ejecutar cambios. Lo frené por {trace.get('reason') or 'seguridad'}. "
+            f"{trace.get('summary') or ''}"
+        ).strip()
     if action_status == "degraded":
-        return f"Recien te respondi con una salida parcial. Motivo: {trace.get('reason') or 'falta de contexto o precision'}. {trace.get('summary')}"
-    return f"Recien te respondi una consulta sobre '{trace.get('intent')}'. {trace.get('summary')}"
+        return (
+            f"Recién te respondí de forma parcial. Motivo: {trace.get('reason') or 'falta de contexto o precisión'}. "
+            f"{trace.get('summary') or ''}"
+        ).strip()
+
+    friendly = _friendly_audit_summary(trace)
+    if friendly:
+        extra = trace.get("summary") or ""
+        if extra and extra not in friendly:
+            return f"{friendly} {extra}".strip()
+        return friendly
+    return f"Recién te respondí esa consulta. {trace.get('summary') or ''}".strip()
 
 
 def _format_audit_resolution(trace: dict) -> str:
@@ -3439,8 +3809,10 @@ def _format_audit_resolution(trace: dict) -> str:
     for scope in ("client", "project", "task"):
         item = resolved.get(scope)
         if item:
-            parts.append(f"{_scope_label(scope)}: {item.get('name')}")
-    return "En el ultimo turno resolvi esto: " + " | ".join(parts)
+            parts.append(f"{_scope_label(scope)} {item.get('name')}")
+    if len(parts) == 1:
+        return f"En el ultimo turno resolví {parts[0]}."
+    return "En el ultimo turno resolví " + ", ".join(parts[:-1]) + f" y {parts[-1]}."
 
 
 def _format_audit_blocked(trace: dict) -> str:
@@ -3456,23 +3828,20 @@ def _format_audit_blocked(trace: dict) -> str:
 
 
 def _format_audit_understood(trace: dict) -> str:
-    parts = [f"Entendi el pedido como '{trace.get('intent')}'."]
+    parts = [_friendly_audit_understood_label(trace)]
     if trace.get("sub_intents"):
-        parts.append(f"Lo parti en: {', '.join(item for item in trace['sub_intents'] if item)}.")
+        parts.append("Además, lo resolví en dos partes compatibles dentro del mismo turno.")
     if trace.get("resolved_entities"):
         parts.append(_format_audit_resolution(trace))
     elif trace.get("candidates"):
-        parts.append("No resolvi una entidad unica; quede entre varios candidatos.")
+        parts.append("No resolví una entidad única; quedé entre varios candidatos y por eso no avancé solo.")
     return " ".join(parts)
 
 
 def _format_audit_action(trace: dict) -> str:
     if trace.get("action_status") != "executed":
         return "En el ultimo turno no ejecute una accion operativa."
-    affected = trace.get("affected_entity") or {}
-    if affected.get("name"):
-        return f"En el ultimo turno ejecute '{trace.get('action_type')}' sobre '{affected.get('name')}'."
-    return f"En el ultimo turno ejecute '{trace.get('action_type')}'."
+    return _friendly_audit_action_label(trace)
 
 
 def _format_audit_reason(trace: dict) -> str:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time
 from types import SimpleNamespace
 
 
@@ -101,4 +101,24 @@ def make_conversation_log(parsed_query: dict, *, user_input: str = "consulta pre
         user_input=user_input,
         parsed_intent=str(parsed_query),
         response_output=response_output,
+    )
+
+
+def make_agenda_item(
+    agenda_item_id: int,
+    title: str,
+    scheduled_date: date,
+    *,
+    scheduled_time: time | None = None,
+    kind: str = "event",
+    note: str | None = None,
+):
+    return SimpleNamespace(
+        id=agenda_item_id,
+        title=title,
+        scheduled_date=scheduled_date,
+        scheduled_time=scheduled_time,
+        kind=kind,
+        note=note,
+        created_at=datetime(2026, 1, 1, 12, 0, 0),
     )

@@ -5,12 +5,13 @@ import traceback
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+from app.services.agenda_service import resolve_agenda_date_hint, resolve_agenda_time_hint
 from app.services.hybrid_parser_service import parse_user_query_hybrid
 from app.services.project_service import (
     get_operational_friction_project_snapshot,
@@ -25,7 +26,7 @@ from app.services.task_service import (
     build_recommendation_focus_from_tasks,
     build_temporal_task_snapshot_from_tasks,
 )
-from tests.helpers import make_client, make_project, make_project_summary, make_task, make_task_summary
+from tests.helpers import make_agenda_item, make_client, make_project, make_project_summary, make_task, make_task_summary
 
 
 TODAY = date(2026, 3, 19)
@@ -76,6 +77,7 @@ class AcceptanceBackend:
         self.clients: list[Any] = []
         self.projects: list[Any] = []
         self.tasks: list[Any] = []
+        self.agenda_items: list[Any] = []
         self._seed()
 
     def _seed(self) -> None:
@@ -172,6 +174,29 @@ class AcceptanceBackend:
                 priority="baja",
                 created_at=datetime(2026, 3, 9, 10, 0, 0),
                 last_updated_at=datetime(2026, 3, 10, 10, 0, 0),
+            ),
+        ]
+
+        self.agenda_items = [
+            make_agenda_item(
+                300,
+                "Reunion con Cam",
+                self.today,
+                scheduled_time=time(10, 0),
+                kind="event",
+            ),
+            make_agenda_item(
+                301,
+                "Dentista",
+                self.today + timedelta(days=1),
+                scheduled_time=time(18, 0),
+                kind="event",
+            ),
+            make_agenda_item(
+                302,
+                "Revisar indicadores",
+                self.today + timedelta(days=1),
+                kind="reminder",
             ),
         ]
 
@@ -317,6 +342,74 @@ class AcceptanceBackend:
                 "se prioriza el proyecto con la mejor jugada operativa disponible",
             ],
         }
+
+    def create_agenda_item(
+        self,
+        title: str,
+        *,
+        scheduled_date: date,
+        scheduled_time: time | None = None,
+        kind: str = "event",
+        note: str | None = None,
+    ) -> dict:
+        agenda_item_id = max(item.id for item in self.agenda_items) + 1 if self.agenda_items else 1
+        item = make_agenda_item(
+            agenda_item_id,
+            title,
+            scheduled_date,
+            scheduled_time=scheduled_time,
+            kind=kind,
+            note=note,
+        )
+        self.agenda_items.append(item)
+        self._record_mutation(
+            "agenda_item",
+            {
+                "agenda_item_id": item.id,
+                "title": item.title,
+                "scheduled_date": item.scheduled_date.isoformat(),
+                "kind": item.kind,
+            },
+        )
+        return {
+            "created": True,
+            "agenda_item_id": item.id,
+            "title": item.title,
+            "scheduled_date": item.scheduled_date,
+            "scheduled_time": item.scheduled_time,
+            "kind": item.kind,
+            "note": item.note,
+            "agenda_item": item,
+        }
+
+    def agenda_items_for_date(self, target_date: date) -> list[Any]:
+        return [
+            item
+            for item in sorted(
+                self.agenda_items,
+                key=lambda agenda_item: (
+                    agenda_item.scheduled_time is None,
+                    agenda_item.scheduled_time or time.max,
+                    agenda_item.id,
+                ),
+            )
+            if item.scheduled_date == target_date
+        ]
+
+    def agenda_items_between_dates(self, start_date: date, end_date: date) -> list[Any]:
+        return [
+            item
+            for item in sorted(
+                self.agenda_items,
+                key=lambda agenda_item: (
+                    agenda_item.scheduled_date,
+                    agenda_item.scheduled_time is None,
+                    agenda_item.scheduled_time or time.max,
+                    agenda_item.id,
+                ),
+            )
+            if start_date <= item.scheduled_date <= end_date
+        ]
 
     def temporal_snapshot(self, time_scope: str, temporal_focus: str | None = None) -> dict:
         return build_temporal_task_snapshot_from_tasks(
@@ -636,7 +729,7 @@ DEFAULT_SCENARIOS = [
         human_review_note="Reclasificado: la clarificacion de create expone opciones confiables en el texto, pero no garantiza una lista estructurada completa de candidatos para este flujo.",
         turns=[
             ScenarioTurn(
-                "agrega una tarea a Cam para definir metricas",
+                "agregame una tarea a Cam: definir metricas",
                 {
                     "should_not_error": True,
                     "should_clarify": True,
@@ -709,7 +802,8 @@ DEFAULT_SCENARIOS = [
                     "should_have_response": True,
                     "should_have_audit_trace": True,
                     "should_have_context_reuse": True,
-                    "should_contain_any": ["Recien te respondi", "get_followup_focus_summary"],
+                    "should_contain_any": ["foco de preocupacion", "cam"],
+                    "should_not_contain_any": ["get_followup_focus_summary"],
                 },
             ),
         ],
@@ -870,6 +964,82 @@ DEFAULT_SCENARIOS = [
                     "should_clarify": True,
                     "should_not_mutate": True,
                     "should_have_action_status": "blocked",
+                },
+            )
+        ],
+    ),
+    Scenario(
+        scenario_id="AGD-001",
+        title="Agenda personal: crear evento para manana a las 10",
+        category="agenda",
+        severity="high",
+        tags=["daily", "agenda", "personal"],
+        turns=[
+            ScenarioTurn(
+                "agendame manana a las 10 una reunion con Cam",
+                {
+                    "should_not_error": True,
+                    "should_have_response": True,
+                    "should_have_intent": "create_agenda_item",
+                    "should_have_action_status": "executed",
+                    "should_contain_any": ["guarde el evento", "10:00", "reunion con cam"],
+                },
+            )
+        ],
+    ),
+    Scenario(
+        scenario_id="AGD-002",
+        title="Agenda personal: agenda de hoy",
+        category="agenda",
+        severity="medium",
+        tags=["daily", "agenda", "personal"],
+        turns=[
+            ScenarioTurn(
+                "que tengo para hoy",
+                {
+                    "should_not_error": True,
+                    "should_have_response": True,
+                    "should_have_intent": "get_agenda_items_summary",
+                    "should_have_scope": "agenda",
+                    "should_contain_any": ["agenda para hoy", "reunion con cam", "10:00"],
+                },
+            )
+        ],
+    ),
+    Scenario(
+        scenario_id="AGD-003",
+        title="Agenda personal: agenda de manana",
+        category="agenda",
+        severity="medium",
+        tags=["daily", "agenda", "personal"],
+        turns=[
+            ScenarioTurn(
+                "que tengo manana",
+                {
+                    "should_not_error": True,
+                    "should_have_response": True,
+                    "should_have_intent": "get_agenda_items_summary",
+                    "should_have_scope": "agenda",
+                    "should_contain_any": ["agenda para manana", "dentista", "revisar indicadores"],
+                },
+            )
+        ],
+    ),
+    Scenario(
+        scenario_id="AGD-004",
+        title="Agenda personal: lo que queda del dia",
+        category="agenda",
+        severity="medium",
+        tags=["daily", "agenda", "personal"],
+        turns=[
+            ScenarioTurn(
+                "que me queda del dia",
+                {
+                    "should_not_error": True,
+                    "should_have_response": True,
+                    "should_have_intent": "get_agenda_items_summary",
+                    "should_have_scope": "agenda",
+                    "should_contain_any": ["te queda del dia", "reunion con cam"],
                 },
             )
         ],
@@ -1252,6 +1422,9 @@ def _turn_scope(parsed: dict[str, Any], resolved_references: dict[str, Any]) -> 
     ):
         if parsed.get(key):
             return parsed[key]
+    context = parsed.get("_conversation_context") or {}
+    if isinstance(context, dict) and context.get("scope"):
+        return context.get("scope")
     return resolved_references.get("scope")
 
 
@@ -1372,6 +1545,10 @@ def _extract_parsed_debug(parsed: dict[str, Any]) -> dict[str, Any]:
         "new_priority",
         "time_scope",
         "due_hint",
+        "agenda_kind",
+        "agenda_date_hint",
+        "agenda_time_hint",
+        "agenda_query_scope",
         "expected_scope",
         "_parser_source",
         "_parser_decision",
@@ -1424,6 +1601,17 @@ def _patch_backend(backend: AcceptanceBackend):
             patch("app.services.query_response_service.get_operational_recommendation_project_snapshot", side_effect=backend.recommendation_project_snapshot),
             patch("app.services.query_response_service.get_temporal_task_snapshot", side_effect=backend.temporal_snapshot),
             patch("app.services.query_response_service.get_missing_due_date_snapshot", side_effect=backend.missing_due_date_snapshot),
+            patch("app.services.query_response_service.create_agenda_item_conversational", side_effect=backend.create_agenda_item),
+            patch("app.services.query_response_service.get_agenda_items_for_date", side_effect=backend.agenda_items_for_date),
+            patch("app.services.query_response_service.get_agenda_items_between_dates", side_effect=backend.agenda_items_between_dates),
+            patch(
+                "app.services.query_response_service.resolve_agenda_date_hint",
+                side_effect=lambda date_hint, today=None: resolve_agenda_date_hint(date_hint, today=backend.today),
+            ),
+            patch(
+                "app.services.query_response_service.resolve_agenda_time_hint",
+                side_effect=lambda time_hint: resolve_agenda_time_hint(time_hint),
+            ),
             patch(
                 "app.services.query_response_service.build_temporal_task_snapshot_from_tasks",
                 side_effect=lambda tasks, time_scope, today=None, temporal_focus=None: build_temporal_task_snapshot_from_tasks(
@@ -1436,6 +1624,26 @@ def _patch_backend(backend: AcceptanceBackend):
             patch(
                 "app.services.query_response_service.build_missing_due_date_snapshot_from_tasks",
                 side_effect=lambda tasks, today=None: build_missing_due_date_snapshot_from_tasks(tasks, today=backend.today),
+            ),
+            patch(
+                "app.services.query_response_service.date",
+                new=type(
+                    "FixedDate",
+                    (date,),
+                    {
+                        "today": classmethod(lambda cls: backend.today),
+                    },
+                ),
+            ),
+            patch(
+                "app.services.query_response_service.datetime",
+                new=type(
+                    "FixedDateTime",
+                    (datetime,),
+                    {
+                        "now": classmethod(lambda cls, tz=None: datetime.combine(backend.today, time(9, 0))),
+                    },
+                ),
             ),
             patch("app.services.query_response_service.create_task_conversational", side_effect=backend.create_task),
             patch("app.services.query_response_service.add_project_note_conversational", side_effect=backend.add_project_note),

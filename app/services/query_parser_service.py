@@ -48,6 +48,8 @@ def _parse_user_query_internal(normalized: str, *, allow_compound: bool) -> dict
             return compound
 
     result = (
+        _parse_agenda_intents(normalized)
+        or
         _parse_creation_intents(normalized)
         or _parse_temporal_read_intents(normalized)
         or _parse_read_intents(normalized)
@@ -56,6 +58,108 @@ def _parse_user_query_internal(normalized: str, *, allow_compound: bool) -> dict
         or _parse_today_intents(normalized)
     )
     return result or {"intent": "unknown"}
+
+
+def _parse_agenda_intents(normalized: str) -> dict | None:
+    return _parse_agenda_creation_intents(normalized) or _parse_agenda_query_intents(normalized)
+
+
+def _parse_agenda_creation_intents(normalized: str) -> dict | None:
+    day_pattern = r"(hoy|mañana|manana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|esta semana)"
+    time_pattern = r"(\d{1,2}(?::\d{2})?\s*hs?|\d{1,2}(?::\d{2})?)"
+
+    match = re.search(rf"^agend(?:a|á)me\s+(?:para\s+)?(?:el\s+)?{day_pattern}\s+a\s+las\s+{time_pattern}\s+(.+)$", normalized)
+    if match:
+        return _build_agenda_creation_payload("event", match.group(1), match.group(2), match.group(3))
+
+    match = re.search(rf"^agend(?:a|á)me\s+(?:para\s+)?(?:el\s+)?{day_pattern}\s+(.+)$", normalized)
+    if match:
+        return _build_agenda_creation_payload("event", match.group(1), None, match.group(2))
+
+    match = re.search(rf"^record(?:a|á)me\s+{day_pattern}\s+a\s+las\s+{time_pattern}\s+(.+)$", normalized)
+    if match:
+        return _build_agenda_creation_payload("reminder", match.group(1), match.group(2), match.group(3))
+
+    match = re.search(rf"^record(?:a|á)me\s+{day_pattern}\s+(.+)$", normalized)
+    if match:
+        return _build_agenda_creation_payload("reminder", match.group(1), None, match.group(2))
+
+    match = re.search(rf"^acordate\s+que\s+{day_pattern}\s+{time_pattern}\s+tengo\s+(.+)$", normalized)
+    if match:
+        return _build_agenda_creation_payload("reminder", match.group(1), match.group(2), match.group(3))
+
+    match = re.search(rf"^{day_pattern}\s+a\s+las\s+{time_pattern}\s+tengo\s+(.+)$", normalized)
+    if match:
+        return _build_agenda_creation_payload("event", match.group(1), match.group(2), match.group(3))
+
+    match = re.search(r"^agend(?:a|á)me\s+(.+)$", normalized)
+    if match:
+        return _build_agenda_creation_payload("event", None, None, match.group(1))
+
+    match = re.search(r"^record(?:a|á)me\s+(.+)$", normalized)
+    if match:
+        return _build_agenda_creation_payload("reminder", None, None, match.group(1))
+
+    match = re.search(r"^acordate\s+que\s+(.+)$", normalized)
+    if match:
+        return _build_agenda_creation_payload("reminder", None, None, match.group(1))
+
+    return None
+
+
+def _parse_agenda_query_intents(normalized: str) -> dict | None:
+    if any(phrase in normalized for phrase in ["que tengo para hoy", "qué tengo para hoy", "que tengo hoy"]):
+        return {"intent": "get_agenda_items_summary", "agenda_query_scope": "today", "agenda_date_hint": "hoy"}
+
+    if any(phrase in normalized for phrase in ["que tengo mañana", "que tengo manana"]):
+        return {"intent": "get_agenda_items_summary", "agenda_query_scope": "tomorrow", "agenda_date_hint": "mañana"}
+
+    if any(phrase in normalized for phrase in ["que tengo esta semana", "qué tengo esta semana"]):
+        return {"intent": "get_agenda_items_summary", "agenda_query_scope": "this_week", "agenda_date_hint": "esta semana"}
+
+    if any(phrase in normalized for phrase in ["que me queda del dia", "qué me queda del día"]):
+        return {"intent": "get_agenda_items_summary", "agenda_query_scope": "rest_of_day", "agenda_date_hint": "hoy"}
+
+    match = re.search(r"^que tengo a las\s+(\d{1,2}(?::\d{2})?)$", normalized)
+    if match:
+        return {
+            "intent": "get_agenda_items_summary",
+            "agenda_query_scope": "at_time",
+            "agenda_date_hint": "hoy",
+            "agenda_time_hint": match.group(1).strip(),
+        }
+
+    if any(phrase in normalized for phrase in ["tengo algo mañana", "tengo algo manana"]):
+        return {
+            "intent": "get_agenda_items_summary",
+            "agenda_query_scope": "tomorrow",
+            "agenda_date_hint": "mañana",
+            "agenda_boolean_query": True,
+        }
+
+    if any(phrase in normalized for phrase in ["que tengo despues", "qué tengo después"]):
+        return {"intent": "get_agenda_items_summary", "agenda_query_scope": "after_current"}
+
+    return None
+
+
+def _build_agenda_creation_payload(kind: str, date_hint: str | None, time_hint: str | None, title: str) -> dict:
+    cleaned_title = _clean_agenda_title(title)
+    return {
+        "intent": "create_agenda_item",
+        "agenda_kind": kind,
+        "agenda_date_hint": date_hint.strip() if date_hint else None,
+        "agenda_time_hint": time_hint.strip() if time_hint else None,
+        "agenda_title": cleaned_title,
+    }
+
+
+def _clean_agenda_title(title: str | None) -> str | None:
+    if not title:
+        return None
+    cleaned = title.strip(" ,.?:;")
+    cleaned = re.sub(r"^(?:una|un)\s+", "", cleaned).strip()
+    return cleaned or None
 
 
 def _parse_compound_intents(normalized: str) -> dict | None:
@@ -126,8 +230,16 @@ def _parse_compound_intents(normalized: str) -> dict | None:
 
 
 def _parse_creation_intents(normalized: str) -> dict | None:
-    create_task_prefix = r"(?:cre(?:a|á)\s+una|cre(?:a|á)|agreg(?:a|á)\s+una|agreg(?:a|á)|sum(?:a|á)\s+una|sum(?:a|á))"
-    create_followup_prefix = r"(?:cre(?:a|á)\s+un|cre(?:a|á)|agreg(?:a|á)\s+un|agreg(?:a|á)|sum(?:a|á)\s+un|sum(?:a|á))"
+    create_task_prefix = (
+        r"(?:cre(?:a|á)me?\s+una|cre(?:a|á)me?|cre(?:a|á)\s+una|cre(?:a|á)|"
+        r"agreg(?:a|á)me?\s+una|agreg(?:a|á)me?|agreg(?:a|á)\s+una|agreg(?:a|á)|"
+        r"sum(?:a|á)me?\s+una|sum(?:a|á)me?|sum(?:a|á)\s+una|sum(?:a|á))"
+    )
+    create_followup_prefix = (
+        r"(?:cre(?:a|á)me?\s+un|cre(?:a|á)me?|cre(?:a|á)\s+un|cre(?:a|á)|"
+        r"agreg(?:a|á)me?\s+un|agreg(?:a|á)me?|agreg(?:a|á)\s+un|agreg(?:a|á)|"
+        r"sum(?:a|á)me?\s+un|sum(?:a|á)me?|sum(?:a|á)\s+un|sum(?:a|á))"
+    )
     priority = "alta" if any(token in normalized for token in ["alta prioridad", "prioridad alta", "urgente"]) else None
 
     stripped_normalized, due_hint, time_scope = _extract_supported_due_hint(normalized)
@@ -139,6 +251,32 @@ def _parse_creation_intents(normalized: str) -> dict | None:
             "client_name": match.group(1).strip(),
             "task_name": match.group(2).strip(),
             "new_priority": priority,
+        }
+        return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
+
+    match = re.search(
+        rf"^{create_task_prefix}\s+tarea\s+a(?:l| el)?\s+proyecto\s+(.+?)\s+de\s+(.+?)(?:\s+para\s+(.+)|\s*:\s*(.+))$",
+        stripped_normalized,
+    )
+    if match:
+        payload = {
+            "intent": "create_task",
+            "project_name": match.group(1).strip(),
+            "client_name": match.group(2).strip(),
+            "task_name": ((match.group(3) or match.group(4) or "").strip() or None),
+            "new_priority": priority,
+            "expected_scope": "project",
+        }
+        return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
+
+    match = re.search(rf"^{create_task_prefix}\s+tarea\s+a\s+(.+?)\s*:\s*(.+)$", stripped_normalized)
+    if match:
+        payload = {
+            "intent": "create_task",
+            "client_name": match.group(1).strip(),
+            "task_name": match.group(2).strip(),
+            "new_priority": priority,
+            "expected_scope": "client",
         }
         return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
 
@@ -156,6 +294,21 @@ def _parse_creation_intents(normalized: str) -> dict | None:
             payload["expected_scope"] = "project"
         else:
             payload["entity_hint"] = target
+        return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
+
+    match = re.search(
+        rf"^{create_task_prefix}\s+tarea\s+al\s+proyecto\s+de\s+(.+?)\s+de\s+(.+?)(?:\s+para\s+(.+)|\s*:\s*(.+))?$",
+        stripped_normalized,
+    )
+    if match:
+        payload = {
+            "intent": "create_task",
+            "project_name": match.group(1).strip(),
+            "client_name": match.group(2).strip(),
+            "task_name": ((match.group(3) or match.group(4) or "").strip() or None),
+            "new_priority": priority,
+            "expected_scope": "project",
+        }
         return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
 
     match = re.search(rf"^{create_task_prefix}\s+tarea\s+al\s+proyecto\s+de\s+(.+?)(?:\s+para\s+(.+)|\s*:\s*(.+))?$", stripped_normalized)
@@ -503,6 +656,18 @@ def _parse_read_intents(normalized: str) -> dict | None:
             }
         )
 
+    match = re.search(r"^que\s+es\s+lo\s+mas\s+importante\s+respecto\s+a\s+(.+?)\??$", normalized)
+    if match:
+        entity_hint = match.group(1).strip()
+        return _augment_targeting_payload(
+            {
+                "intent": "get_operational_summary",
+                "entity_hint": entity_hint,
+                "client_name": entity_hint,
+                "expected_scope": "client",
+            }
+        )
+
     match = re.search(r"^resumime\s+el\s+(.+)$", normalized)
     if match:
         return _augment_targeting_payload({"intent": "get_operational_summary", "entity_hint": match.group(1).strip()})
@@ -703,6 +868,9 @@ def _parse_read_intents(normalized: str) -> dict | None:
     if any(
         phrase in normalized
         for phrase in [
+            "que harias ahora",
+            "que me recomendarias hacer ahora",
+            "que me recomendarías hacer ahora",
             "que deberia priorizar aca",
             "quÃ© deberÃ­a priorizar acÃ¡",
             "que haria ahora",
