@@ -120,14 +120,16 @@ class ResponseUxBehaviorTests(unittest.TestCase):
             "intent": "get_operational_summary",
             "action_status": "informational",
             "summary": "Resumen del cliente CAM",
+            "resolved_entities": {"client": {"name": "CAM"}},
         }
         context = {"_isolated": True, "scope": "client", "audit_trace": trace}
         parsed = parse_user_query("que hiciste recien")
 
         response = build_response_from_query(parsed, user_query="que hiciste recien", conversation_context=context)
 
-        self.assertIn("recien te respondi", response.lower())
-        self.assertIn("resumen del cliente cam", response.lower())
+        self.assertIn("recien te resumi", response.lower())
+        self.assertIn("cam", response.lower())
+        self.assertNotIn("get_operational_summary", response.lower())
 
 
 if __name__ == "__main__":

@@ -38,7 +38,9 @@ class CreationBehaviorTests(unittest.TestCase):
             next_action=None,
             last_note=None,
         )
-        self.assertIn("cree una tarea nueva", response.lower())
+        self.assertTrue(
+            "cree una tarea nueva" in response.lower() or "cree la tarea nueva" in response.lower()
+        )
         self.assertIn("dashboard", response.lower())
         self.assertTrue(parsed.get("_creation_real"))
 
@@ -69,6 +71,73 @@ class CreationBehaviorTests(unittest.TestCase):
 
         create_mock.assert_called_once()
         self.assertIn("dashboard", response.lower())
+        self.assertEqual(parsed.get("_creation_target_scope"), "project")
+
+    def test_create_task_with_natural_client_phrase(self):
+        client = make_client(1, "CAM")
+        project = make_project(10, "Dashboard", client)
+        create_result = {
+            "created": True,
+            "task_id": 204,
+            "task_title": "hacer revision anual",
+            "project_id": project.id,
+            "priority": "media",
+            "next_action": None,
+            "last_note": None,
+        }
+        parsed = parse_user_query("agregame una tarea a cam: hacer revision anual")
+
+        with patch("app.services.reference_resolver.get_all_clients", return_value=[client]), patch(
+            "app.services.query_response_service.get_projects_by_client_id",
+            return_value=[project],
+        ), patch(
+            "app.services.query_response_service.create_task_conversational",
+            return_value=create_result,
+        ) as create_mock:
+            response = build_response_from_query(parsed, user_query="agregame una tarea a cam: hacer revision anual", conversation_context={})
+
+        create_mock.assert_called_once_with(
+            project.id,
+            "hacer revision anual",
+            priority="media",
+            due_date=None,
+            next_action=None,
+            last_note=None,
+        )
+        self.assertIn("hacer revision anual", response.lower())
+
+    def test_create_task_with_natural_project_and_client_phrase(self):
+        client = make_client(1, "CAM")
+        project = make_project(10, "Automatizacion", client)
+        create_result = {
+            "created": True,
+            "task_id": 205,
+            "task_title": "hacer revision anual",
+            "project_id": project.id,
+            "priority": "media",
+            "next_action": None,
+            "last_note": None,
+        }
+        parsed = parse_user_query("agregame una tarea a el proyecto automatizacion de cam: hacer revision anual")
+
+        with patch("app.services.reference_resolver.get_all_clients", return_value=[client]), patch(
+            "app.services.reference_resolver.get_all_projects",
+            return_value=[project],
+        ), patch(
+            "app.services.query_response_service.create_task_conversational",
+            return_value=create_result,
+        ) as create_mock:
+            response = build_response_from_query(
+                parsed,
+                user_query="agregame una tarea a el proyecto automatizacion de cam: hacer revision anual",
+                conversation_context={},
+            )
+
+        create_mock.assert_called_once()
+        self.assertEqual(create_mock.call_args.args[1], "hacer revision anual")
+        self.assertTrue(
+            "automatizacion" in response.lower() or "automatización" in response.lower()
+        )
         self.assertEqual(parsed.get("_creation_target_scope"), "project")
 
     def test_create_high_priority_task(self):

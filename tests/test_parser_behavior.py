@@ -224,6 +224,30 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(after_current["agenda_query_scope"], "after_current")
         self.assertTrue(boolean_query["agenda_boolean_query"])
 
+    def test_parse_agenda_crud_queries(self):
+        delete_event = parse_user_query("borra la reunion de manana")
+        delete_reminder = parse_user_query("cancela el recordatorio de revisar indicadores")
+        delete_context = parse_user_query("borra eso")
+        reschedule_time = parse_user_query("cambia la reunion de manana de las 11 a las 12")
+        reschedule_date_time = parse_user_query("reprograma el dentista para el viernes a las 18")
+        move_context = parse_user_query("pasa eso para manana")
+        move_time = parse_user_query("move la reunion a las 15")
+
+        self.assertEqual(delete_event["intent"], "delete_agenda_item")
+        self.assertEqual(delete_event["agenda_target_title"], "reunion")
+        self.assertEqual(delete_event["agenda_target_date_hint"], "manana")
+        self.assertEqual(delete_reminder["intent"], "delete_agenda_item")
+        self.assertEqual(delete_reminder["agenda_target_kind"], "reminder")
+        self.assertTrue(delete_context["agenda_use_context"])
+        self.assertEqual(reschedule_time["intent"], "update_agenda_item")
+        self.assertEqual(reschedule_time["agenda_target_time_hint"], "11")
+        self.assertEqual(reschedule_time["agenda_new_time_hint"], "12")
+        self.assertEqual(reschedule_date_time["agenda_target_title"], "dentista")
+        self.assertEqual(reschedule_date_time["agenda_new_date_hint"], "viernes")
+        self.assertEqual(reschedule_date_time["agenda_new_time_hint"], "18")
+        self.assertTrue(move_context["agenda_use_context"])
+        self.assertEqual(move_time["agenda_new_time_hint"], "15")
+
     def test_parse_compound_queries(self):
         summary_and_recommend = parse_user_query("resumime Cam y decime que haria primero")
         temporal_and_friction = parse_user_query("que vence y que me preocuparia")

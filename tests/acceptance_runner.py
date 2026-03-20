@@ -220,6 +220,9 @@ class AcceptanceBackend:
     def all_tasks(self) -> list[Any]:
         return list(self.tasks)
 
+    def all_agenda_items(self) -> list[Any]:
+        return list(self.agenda_items)
+
     def projects_by_client_id(self, client_id: int) -> list[Any]:
         return [project for project in self.projects if getattr(project, "client_id", None) == client_id]
 
@@ -380,6 +383,61 @@ class AcceptanceBackend:
             "kind": item.kind,
             "note": item.note,
             "agenda_item": item,
+        }
+
+    def update_agenda_item(
+        self,
+        agenda_item_id: int,
+        *,
+        scheduled_date: date | None = None,
+        scheduled_time: time | None = None,
+    ) -> dict:
+        item = next((agenda_item for agenda_item in self.agenda_items if agenda_item.id == agenda_item_id), None)
+        if not item:
+            return {"updated": False, "error": "not_found"}
+        if scheduled_date is not None:
+            item.scheduled_date = scheduled_date
+        item.scheduled_time = scheduled_time
+        self._record_mutation(
+            "agenda_item_update",
+            {
+                "agenda_item_id": item.id,
+                "title": item.title,
+                "scheduled_date": item.scheduled_date.isoformat(),
+                "scheduled_time": item.scheduled_time.strftime("%H:%M") if item.scheduled_time else None,
+            },
+        )
+        return {
+            "updated": True,
+            "agenda_item_id": item.id,
+            "title": item.title,
+            "scheduled_date": item.scheduled_date,
+            "scheduled_time": item.scheduled_time,
+            "kind": item.kind,
+            "note": item.note,
+            "agenda_item": item,
+        }
+
+    def delete_agenda_item(self, agenda_item_id: int) -> dict:
+        item = next((agenda_item for agenda_item in self.agenda_items if agenda_item.id == agenda_item_id), None)
+        if not item:
+            return {"deleted": False, "error": "not_found"}
+        self.agenda_items = [agenda_item for agenda_item in self.agenda_items if agenda_item.id != agenda_item_id]
+        self._record_mutation(
+            "agenda_item_delete",
+            {
+                "agenda_item_id": item.id,
+                "title": item.title,
+            },
+        )
+        return {
+            "deleted": True,
+            "agenda_item_id": item.id,
+            "title": item.title,
+            "scheduled_date": item.scheduled_date,
+            "scheduled_time": item.scheduled_time,
+            "kind": item.kind,
+            "note": item.note,
         }
 
     def agenda_items_for_date(self, target_date: date) -> list[Any]:
@@ -1045,6 +1103,57 @@ DEFAULT_SCENARIOS = [
         ],
     ),
     Scenario(
+        scenario_id="AGD-005",
+        title="Agenda personal: crear y mover evento",
+        category="agenda",
+        severity="medium",
+        tags=["daily", "agenda", "personal", "crud"],
+        turns=[
+            ScenarioTurn(
+                "agendame manana a las 10 una revision anual con Cam",
+                {
+                    "should_not_error": True,
+                    "should_have_action_status": "executed",
+                    "should_contain_any": ["guarde el evento", "10:00"],
+                },
+            ),
+            ScenarioTurn(
+                "move la revision anual a las 15",
+                {
+                    "should_not_error": True,
+                    "should_have_intent": "update_agenda_item",
+                    "should_have_action_status": "executed",
+                    "should_contain_any": ["reprograme", "15:00"],
+                },
+            ),
+        ],
+    ),
+    Scenario(
+        scenario_id="AGD-006",
+        title="Agenda personal: crear y borrar evento",
+        category="agenda",
+        severity="medium",
+        tags=["daily", "agenda", "personal", "crud"],
+        turns=[
+            ScenarioTurn(
+                "agendame manana a las 10 una reunion con Cam",
+                {
+                    "should_not_error": True,
+                    "should_have_action_status": "executed",
+                },
+            ),
+            ScenarioTurn(
+                "borra eso",
+                {
+                    "should_not_error": True,
+                    "should_have_intent": "delete_agenda_item",
+                    "should_have_action_status": "executed",
+                    "should_contain_any": ["elimine", "reunion con cam"],
+                },
+            ),
+        ],
+    ),
+    Scenario(
         scenario_id="CMP-002",
         title="Compuesto con degradacion parcial",
         category="compound",
@@ -1549,6 +1658,13 @@ def _extract_parsed_debug(parsed: dict[str, Any]) -> dict[str, Any]:
         "agenda_date_hint",
         "agenda_time_hint",
         "agenda_query_scope",
+        "agenda_target_title",
+        "agenda_target_date_hint",
+        "agenda_target_time_hint",
+        "agenda_target_kind",
+        "agenda_use_context",
+        "agenda_new_date_hint",
+        "agenda_new_time_hint",
         "expected_scope",
         "_parser_source",
         "_parser_decision",
@@ -1602,6 +1718,9 @@ def _patch_backend(backend: AcceptanceBackend):
             patch("app.services.query_response_service.get_temporal_task_snapshot", side_effect=backend.temporal_snapshot),
             patch("app.services.query_response_service.get_missing_due_date_snapshot", side_effect=backend.missing_due_date_snapshot),
             patch("app.services.query_response_service.create_agenda_item_conversational", side_effect=backend.create_agenda_item),
+            patch("app.services.query_response_service.update_agenda_item_conversational", side_effect=backend.update_agenda_item),
+            patch("app.services.query_response_service.delete_agenda_item_conversational", side_effect=backend.delete_agenda_item),
+            patch("app.services.query_response_service.get_all_agenda_items", side_effect=backend.all_agenda_items),
             patch("app.services.query_response_service.get_agenda_items_for_date", side_effect=backend.agenda_items_for_date),
             patch("app.services.query_response_service.get_agenda_items_between_dates", side_effect=backend.agenda_items_between_dates),
             patch(

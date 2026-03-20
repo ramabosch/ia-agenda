@@ -209,6 +209,24 @@ class OperationalSummaryBehaviorTests(unittest.TestCase):
         self.assertIn("resumen del proyecto dashboard", response.lower())
         self.assertEqual(parsed.get("_summary_scope"), "contextual_project")
 
+    def test_explicit_client_phrase_prioritizes_client_scope(self):
+        client = make_client(1, "Rosario Capilar")
+        project = make_project(10, "Automatizacion", client)
+        task = make_task(100, "Revision anual", project, priority="alta")
+
+        with patch("app.services.reference_resolver.get_all_clients", return_value=[client]), patch(
+            "app.services.query_response_service.get_projects_by_client_id",
+            return_value=[project],
+        ), patch(
+            "app.services.query_response_service.get_tasks_by_client_id",
+            return_value=[task],
+        ):
+            parsed = parse_user_query("que es lo mas importante respecto a rosario capilar?")
+            response = build_response_from_query(parsed, user_query="que es lo mas importante respecto a rosario capilar?", conversation_context={})
+
+        self.assertIn("resumen del cliente rosario capilar", response.lower())
+        self.assertEqual(parsed.get("_summary_scope"), "client")
+
     def test_ambiguous_operational_summary_keeps_clarification(self):
         client = make_client(1, "CAM")
         project = make_project(10, "Dashboard", client)

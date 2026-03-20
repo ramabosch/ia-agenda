@@ -90,6 +90,32 @@ class RecommendationBehaviorTests(unittest.TestCase):
         self.assertIn("porque", response.lower())
         self.assertEqual(parsed.get("_recommendation_scope"), "contextual_client")
 
+    def test_natural_recommendation_followup_uses_safe_context(self):
+        client = make_client(1, "CAM")
+        project = make_project(10, "Dashboard", client)
+        blocked = make_task(100, "Resolver API", project, status="bloqueada", priority="alta")
+        context = {
+            "_isolated": True,
+            "scope": "client",
+            "client": {"id": client.id, "name": client.name},
+        }
+
+        with patch("app.services.query_response_service.get_tasks_by_client_id", return_value=[blocked]), patch(
+            "app.services.query_response_service.get_projects_by_client_id",
+            return_value=[project],
+        ):
+            parsed = parse_user_query("que me recomendarias hacer ahora")
+            response = build_response_from_query(parsed, user_query="que me recomendarias hacer ahora", conversation_context=context)
+
+        self.assertIn("lo que yo haria con cam", response.lower())
+        self.assertEqual(parsed.get("_recommendation_scope"), "contextual_client")
+
+    def test_natural_recommendation_followup_without_context_does_not_invent(self):
+        parsed = parse_user_query("que harias ahora")
+        response = build_response_from_query(parsed, user_query="que harias ahora", conversation_context={})
+        self.assertIn("no tengo contexto aislado actual", response.lower())
+        self.assertIn("cliente, proyecto o tarea exacta", response.lower())
+
     def test_ambiguous_recommendation_keeps_clarification(self):
         client = make_client(1, "CAM")
         project = make_project(10, "Dashboard", client)

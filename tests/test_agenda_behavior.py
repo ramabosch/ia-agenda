@@ -293,6 +293,158 @@ class AgendaBehaviorTests(unittest.TestCase):
         self.assertEqual(parsed["intent"], "create_agenda_item")
         self.assertNotEqual(parsed["intent"], "create_task")
 
+    def test_delete_clear_agenda_item(self):
+        parsed = parse_user_query("cancela el recordatorio de revisar indicadores")
+        item = make_agenda_item(11, "revisar indicadores", date(2026, 3, 21), kind="reminder")
+
+        with patch("app.services.query_response_service.get_all_agenda_items", return_value=[item]), patch(
+            "app.services.query_response_service.delete_agenda_item_conversational",
+            return_value={
+                "deleted": True,
+                "agenda_item_id": 11,
+                "title": "revisar indicadores",
+                "scheduled_date": date(2026, 3, 21),
+                "scheduled_time": None,
+                "kind": "reminder",
+                "note": None,
+            },
+        ):
+            response = build_response_from_query(parsed, user_query="cancela el recordatorio de revisar indicadores")
+
+        self.assertIn("elimin", response.lower())
+        self.assertIn("revisar indicadores", response.lower())
+        self.assertEqual(parsed["_audit_trace"]["action_status"], "executed")
+
+    def test_reschedule_agenda_item_time(self):
+        parsed = parse_user_query("cambia la reunion de manana de las 11 a las 12")
+        item = make_agenda_item(12, "reunion", date(2026, 3, 21), scheduled_time=time(11, 0))
+
+        with patch("app.services.query_response_service.get_all_agenda_items", return_value=[item]), patch(
+            "app.services.query_response_service.resolve_agenda_date_hint",
+            return_value={
+                "resolved": True,
+                "scope": "tomorrow",
+                "target_date": date(2026, 3, 21),
+                "start_date": date(2026, 3, 21),
+                "end_date": date(2026, 3, 21),
+                "label": "manana",
+                "error": None,
+            },
+        ), patch(
+            "app.services.query_response_service.resolve_agenda_time_hint",
+            side_effect=[
+                {"resolved": True, "scheduled_time": time(11, 0), "label": "11:00", "error": None},
+                {"resolved": True, "scheduled_time": time(12, 0), "label": "12:00", "error": None},
+            ],
+        ), patch(
+            "app.services.query_response_service.update_agenda_item_conversational",
+            return_value={
+                "updated": True,
+                "agenda_item_id": 12,
+                "title": "reunion",
+                "scheduled_date": date(2026, 3, 21),
+                "scheduled_time": time(12, 0),
+                "kind": "event",
+                "note": None,
+            },
+        ):
+            response = build_response_from_query(parsed, user_query="cambia la reunion de manana de las 11 a las 12")
+
+        self.assertIn("reprogram", response.lower())
+        self.assertIn("12:00", response)
+
+    def test_reschedule_agenda_item_date_and_time(self):
+        parsed = parse_user_query("reprograma el dentista para el viernes a las 18")
+        item = make_agenda_item(13, "dentista", date(2026, 3, 21), scheduled_time=time(10, 0))
+
+        with patch("app.services.query_response_service.get_all_agenda_items", return_value=[item]), patch(
+            "app.services.query_response_service.resolve_agenda_date_hint",
+            return_value={
+                "resolved": True,
+                "scope": "weekday",
+                "target_date": date(2026, 3, 27),
+                "start_date": date(2026, 3, 27),
+                "end_date": date(2026, 3, 27),
+                "label": "viernes",
+                "error": None,
+            },
+        ), patch(
+            "app.services.query_response_service.resolve_agenda_time_hint",
+            return_value={"resolved": True, "scheduled_time": time(18, 0), "label": "18:00", "error": None},
+        ), patch(
+            "app.services.query_response_service.update_agenda_item_conversational",
+            return_value={
+                "updated": True,
+                "agenda_item_id": 13,
+                "title": "dentista",
+                "scheduled_date": date(2026, 3, 27),
+                "scheduled_time": time(18, 0),
+                "kind": "event",
+                "note": None,
+            },
+        ):
+            response = build_response_from_query(parsed, user_query="reprograma el dentista para el viernes a las 18")
+
+        self.assertIn("2026-03-27", response)
+        self.assertIn("18:00", response)
+
+    def test_reschedule_with_context_target(self):
+        parsed = parse_user_query("pasa eso para manana")
+        items = [make_agenda_item(14, "dentista", date(2026, 3, 20), scheduled_time=time(15, 0))]
+        context = {
+            "_isolated": True,
+            "scope": "agenda",
+            "agenda_context": {
+                "agenda_item_id": 14,
+                "title": "dentista",
+                "anchor_date": "2026-03-20",
+                "anchor_time": "15:00",
+            },
+        }
+
+        with patch("app.services.query_response_service.get_all_agenda_items", return_value=items), patch(
+            "app.services.query_response_service.resolve_agenda_date_hint",
+            return_value={
+                "resolved": True,
+                "scope": "tomorrow",
+                "target_date": date(2026, 3, 21),
+                "start_date": date(2026, 3, 21),
+                "end_date": date(2026, 3, 21),
+                "label": "manana",
+                "error": None,
+            },
+        ), patch(
+            "app.services.query_response_service.update_agenda_item_conversational",
+            return_value={
+                "updated": True,
+                "agenda_item_id": 14,
+                "title": "dentista",
+                "scheduled_date": date(2026, 3, 21),
+                "scheduled_time": time(15, 0),
+                "kind": "event",
+                "note": None,
+            },
+        ):
+            response = build_response_from_query(parsed, user_query="pasa eso para manana", conversation_context=context)
+
+        self.assertIn("dentista", response.lower())
+        self.assertIn("2026-03-21", response)
+
+    def test_agenda_target_ambiguity_does_not_mutate(self):
+        parsed = parse_user_query("cancela el recordatorio de revisar indicadores")
+        items = [
+            make_agenda_item(15, "revisar indicadores", date(2026, 3, 21), kind="reminder"),
+            make_agenda_item(16, "revisar indicadores", date(2026, 3, 22), kind="reminder"),
+        ]
+
+        with patch("app.services.query_response_service.get_all_agenda_items", return_value=items), patch(
+            "app.services.query_response_service.delete_agenda_item_conversational"
+        ) as delete_mock:
+            response = build_response_from_query(parsed, user_query="cancela el recordatorio de revisar indicadores")
+
+        delete_mock.assert_not_called()
+        self.assertIn("mas de un item posible", response.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

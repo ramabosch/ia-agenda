@@ -61,7 +61,12 @@ def _parse_user_query_internal(normalized: str, *, allow_compound: bool) -> dict
 
 
 def _parse_agenda_intents(normalized: str) -> dict | None:
-    return _parse_agenda_creation_intents(normalized) or _parse_agenda_query_intents(normalized)
+    return (
+        _parse_agenda_creation_intents(normalized)
+        or _parse_agenda_update_intents(normalized)
+        or _parse_agenda_delete_intents(normalized)
+        or _parse_agenda_query_intents(normalized)
+    )
 
 
 def _parse_agenda_creation_intents(normalized: str) -> dict | None:
@@ -139,6 +144,84 @@ def _parse_agenda_query_intents(normalized: str) -> dict | None:
 
     if any(phrase in normalized for phrase in ["que tengo despues", "qué tengo después"]):
         return {"intent": "get_agenda_items_summary", "agenda_query_scope": "after_current"}
+
+    return None
+
+
+def _parse_agenda_delete_intents(normalized: str) -> dict | None:
+    if normalized in {"borra eso", "borra esto", "cancela eso", "cancela esto"}:
+        return {
+            "intent": "delete_agenda_item",
+            "agenda_use_context": True,
+        }
+
+    match = re.search(r"^(?:cancela|cancelá)\s+el\s+recordatorio\s+de\s+(.+)$", normalized)
+    if match:
+        return {
+            "intent": "delete_agenda_item",
+            "agenda_target_kind": "reminder",
+            "agenda_target_title": _clean_agenda_title(match.group(1)),
+        }
+
+    match = re.search(r"^(?:elimina|eliminá|borra)\s+el\s+evento\s+de\s+las?\s+(\d{1,2}(?::\d{2})?)$", normalized)
+    if match:
+        return {
+            "intent": "delete_agenda_item",
+            "agenda_target_kind": "event",
+            "agenda_target_time_hint": match.group(1).strip(),
+        }
+
+    match = re.search(r"^(?:borra|elimina|eliminá)\s+la\s+reunion\s+de\s+(hoy|mañana|manana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)$", normalized)
+    if match:
+        return {
+            "intent": "delete_agenda_item",
+            "agenda_target_kind": "event",
+            "agenda_target_title": "reunion",
+            "agenda_target_date_hint": match.group(1).strip(),
+        }
+
+    return None
+
+
+def _parse_agenda_update_intents(normalized: str) -> dict | None:
+    day_pattern = r"(hoy|mañana|manana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo)"
+    time_pattern = r"(\d{1,2}(?::\d{2})?)"
+
+    match = re.search(
+        rf"^cambi[aá]\s+la\s+(.+?)\s+de\s+{day_pattern}\s+de\s+las?\s+{time_pattern}\s+a\s+las?\s+{time_pattern}$",
+        normalized,
+    )
+    if match:
+        return {
+            "intent": "update_agenda_item",
+            "agenda_target_title": _clean_agenda_title(match.group(1)),
+            "agenda_target_date_hint": match.group(2).strip(),
+            "agenda_target_time_hint": match.group(3).strip(),
+            "agenda_new_time_hint": match.group(4).strip(),
+        }
+
+    match = re.search(
+        rf"^(?:reprograma|pas[aá]|mueve|move)\s+(?:el|la\s+)?(.+?)\s+para\s+(?:el\s+)?{day_pattern}(?:\s+a\s+las?\s+{time_pattern})?$",
+        normalized,
+    )
+    if match:
+        target = _clean_agenda_title(match.group(1))
+        use_context = target in {"eso", "esto"}
+        return {
+            "intent": "update_agenda_item",
+            "agenda_use_context": use_context,
+            "agenda_target_title": None if use_context else target,
+            "agenda_new_date_hint": match.group(2).strip(),
+            "agenda_new_time_hint": match.group(3).strip() if match.group(3) else None,
+        }
+
+    match = re.search(rf"^(?:mueve|move|cambi[aá])\s+la\s+(.+?)\s+a\s+las?\s+{time_pattern}$", normalized)
+    if match:
+        return {
+            "intent": "update_agenda_item",
+            "agenda_target_title": _clean_agenda_title(match.group(1)),
+            "agenda_new_time_hint": match.group(2).strip(),
+        }
 
     return None
 

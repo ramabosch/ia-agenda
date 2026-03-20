@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from app.channels.telegram.adapter import (
     TelegramChannelAdapter,
+    build_telegram_conversation_key,
     extract_telegram_message,
     get_telegram_bot_token,
 )
@@ -31,14 +32,16 @@ class TelegramChannelTests(unittest.TestCase):
             context_store=store,
             persist_log=False,
         )
-        store.save_context("chat-a", {"_isolated": True, "scope": "client", "client": {"id": 1, "name": "Cam"}})
-        store.save_context("chat-b", {"_isolated": True, "scope": "client", "client": {"id": 2, "name": "Dallas"}})
+        key_a = build_telegram_conversation_key(chat_id="chat-a", chat_type="private", user_id="11")
+        key_b = build_telegram_conversation_key(chat_id="chat-b", chat_type="private", user_id="22")
+        store.save_context(key_a, {"_isolated": True, "scope": "client", "client": {"id": 1, "name": "Cam"}})
+        store.save_context(key_b, {"_isolated": True, "scope": "client", "client": {"id": 2, "name": "Dallas"}})
 
-        result = adapter.handle_incoming_text(chat_id="chat-a", text="/reset")
+        result = adapter.handle_incoming_text(chat_id="chat-a", user_id="11", chat_type="private", text="/reset")
 
         self.assertIn("limpie el contexto", result["response_text"].lower())
-        self.assertEqual(store.get_context("chat-a"), {})
-        self.assertEqual(store.get_context("chat-b").get("client", {}).get("name"), "Dallas")
+        self.assertEqual(store.get_context(key_a), {})
+        self.assertEqual(store.get_context(key_b).get("client", {}).get("name"), "Dallas")
 
     def test_chat_a_does_not_contaminate_chat_b_context(self):
         cam = make_client(1, "Cam")
@@ -138,6 +141,35 @@ class TelegramChannelTests(unittest.TestCase):
         )
         self.assertEqual(result["normalized_input_text"], "Agregame una tarea a cam: hacer revision anual")
 
+    def test_status_command_shows_identity_and_conversation_key(self):
+        adapter = TelegramChannelAdapter(
+            context_store=InMemoryTelegramContextStore(),
+            persist_log=False,
+        )
+        conversation_key = build_telegram_conversation_key(
+            chat_id="999",
+            chat_type="supergroup",
+            user_id="123",
+            message_thread_id="77",
+        )
+        adapter.context_store.save_context(
+            conversation_key,
+            {"_isolated": True, "scope": "agenda", "agenda_context": {"title": "reunion con cam"}},
+        )
+
+        result = adapter.handle_incoming_text(
+            chat_id="999",
+            user_id="123",
+            chat_type="supergroup",
+            message_thread_id="77",
+            text="/status",
+        )
+
+        self.assertEqual(result["channel_command"], "/status")
+        self.assertIn("conversation_key", result["response_text"])
+        self.assertIn("message_thread_id: 77", result["response_text"])
+        self.assertIn(conversation_key, result["response_text"])
+
     def test_adapter_supports_personal_agenda_creation(self):
         adapter = TelegramChannelAdapter(
             context_store=InMemoryTelegramContextStore(),
@@ -194,7 +226,8 @@ class TelegramChannelTests(unittest.TestCase):
             "update_id": 9001,
             "message": {
                 "message_id": 77,
-                "chat": {"id": 12345},
+                "chat": {"id": 12345, "type": "private"},
+                "from": {"id": 987},
                 "text": "comentame en que andamos con Cam",
             },
         }
@@ -211,10 +244,30 @@ class TelegramChannelTests(unittest.TestCase):
         self.assertEqual(result["chat_id"], "12345")
         self.assertEqual(result["message_id"], 77)
         self.assertEqual(result["update_id"], 9001)
+        self.assertEqual(result["user_id"], "987")
         self.assertTrue(result["response_text"])
         self.assertTrue(result["conversation_context"].get("_isolated"))
         self.assertTrue(result["audit_trace"])
         self.assertEqual(result["send_message_payload"]["chat_id"], "12345")
+
+    def test_extract_telegram_message_includes_identity_and_thread(self):
+        payload = extract_telegram_message(
+            {
+                "update_id": 12,
+                "message": {
+                    "message_id": 55,
+                    "chat": {"id": -1001, "type": "supergroup"},
+                    "from": {"id": 42, "username": "rami"},
+                    "message_thread_id": 9,
+                    "text": "hola",
+                },
+            }
+        )
+
+        self.assertEqual(payload["chat_id"], "-1001")
+        self.assertEqual(payload["user_id"], "42")
+        self.assertEqual(payload["message_thread_id"], "9")
+        self.assertIn("thread:9", payload["conversation_key"])
 
     def test_extract_telegram_message_rejects_missing_text(self):
         with self.assertRaisesRegex(ValueError, "texto util"):

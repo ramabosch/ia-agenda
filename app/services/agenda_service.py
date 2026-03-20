@@ -81,6 +81,66 @@ def get_agenda_items_between_dates(start_date: date, end_date: date):
         db.close()
 
 
+def get_all_agenda_items():
+    _ensure_agenda_db()
+    db = SessionLocal()
+    try:
+        return agenda_repository.get_all_agenda_items(db)
+    finally:
+        db.close()
+
+
+def update_agenda_item_conversational(
+    agenda_item_id: int,
+    *,
+    scheduled_date: date | None = None,
+    scheduled_time: time | None = None,
+):
+    _ensure_agenda_db()
+    db = SessionLocal()
+    try:
+        item = agenda_repository.update_agenda_item(
+            db,
+            agenda_item_id,
+            scheduled_date=scheduled_date,
+            scheduled_time=scheduled_time,
+        )
+        if not item:
+            return {"updated": False, "error": "not_found"}
+        return {
+            "updated": True,
+            "agenda_item_id": item.id,
+            "title": item.title,
+            "scheduled_date": item.scheduled_date,
+            "scheduled_time": item.scheduled_time,
+            "kind": item.kind,
+            "note": item.note,
+            "agenda_item": item,
+        }
+    finally:
+        db.close()
+
+
+def delete_agenda_item_conversational(agenda_item_id: int):
+    _ensure_agenda_db()
+    db = SessionLocal()
+    try:
+        item = agenda_repository.delete_agenda_item(db, agenda_item_id)
+        if not item:
+            return {"deleted": False, "error": "not_found"}
+        return {
+            "deleted": True,
+            "agenda_item_id": item.id,
+            "title": item.title,
+            "scheduled_date": item.scheduled_date,
+            "scheduled_time": item.scheduled_time,
+            "kind": item.kind,
+            "note": item.note,
+        }
+    finally:
+        db.close()
+
+
 def resolve_agenda_date_hint(date_hint: str | None, *, today: date | None = None) -> dict:
     today = today or date.today()
     normalized = _normalize_agenda_text(date_hint)

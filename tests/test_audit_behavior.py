@@ -119,7 +119,9 @@ class AuditBehaviorTests(unittest.TestCase):
             second = parse_user_query("que hiciste recien")
             response = build_response_from_query(second, user_query="que hiciste recien", conversation_context=context)
 
-        self.assertIn("recien respondi", response.lower())
+        self.assertIn("recien te resumi", response.lower())
+        self.assertIn("cam", response.lower())
+        self.assertNotIn("get_operational_summary", response.lower())
 
     def test_audit_followup_por_que_elegiste_esa_uses_recent_trace(self):
         client = make_client(1, "CAM")

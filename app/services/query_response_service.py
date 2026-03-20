@@ -7,10 +7,13 @@ from app.services.conversation_service import (
 )
 from app.services.agenda_service import (
     create_agenda_item_conversational,
+    delete_agenda_item_conversational,
+    get_all_agenda_items,
     get_agenda_items_between_dates,
     get_agenda_items_for_date,
     resolve_agenda_date_hint,
     resolve_agenda_time_hint,
+    update_agenda_item_conversational,
 )
 from app.services.project_service import (
     add_project_note_conversational,
@@ -145,6 +148,14 @@ AGENDA_CREATION_INTENTS = {
     "create_agenda_item",
 }
 
+AGENDA_UPDATE_INTENTS = {
+    "update_agenda_item",
+}
+
+AGENDA_DELETE_INTENTS = {
+    "delete_agenda_item",
+}
+
 AGENDA_QUERY_INTENTS = {
     "get_agenda_items_summary",
 }
@@ -171,6 +182,20 @@ def build_response_from_query(
 
     if intent in AGENDA_CREATION_INTENTS:
         return _handle_agenda_creation_intent(parsed_query, conversation_context=conversation_context)
+
+    if intent in AGENDA_UPDATE_INTENTS:
+        return _handle_agenda_update_intent(
+            parsed_query,
+            user_query=user_query,
+            conversation_context=conversation_context,
+        )
+
+    if intent in AGENDA_DELETE_INTENTS:
+        return _handle_agenda_delete_intent(
+            parsed_query,
+            user_query=user_query,
+            conversation_context=conversation_context,
+        )
 
     if intent in AGENDA_QUERY_INTENTS:
         return _handle_agenda_query_intent(
@@ -600,6 +625,7 @@ def _handle_agenda_creation_intent(parsed_query: dict, *, conversation_context: 
         **_base_conversation_context(parsed_query, "agenda"),
         "agenda_context": {
             "query_scope": "created_item",
+            "agenda_item_id": result["agenda_item_id"],
             "anchor_date": result["scheduled_date"].isoformat(),
             "anchor_time": result["scheduled_time"].strftime("%H:%M") if result.get("scheduled_time") else None,
             "kind": result["kind"],
@@ -626,6 +652,218 @@ def _handle_agenda_creation_intent(parsed_query: dict, *, conversation_context: 
     return response
 
 
+def _handle_agenda_update_intent(
+    parsed_query: dict,
+    *,
+    user_query: str | None,
+    conversation_context: dict | None,
+) -> str:
+    target = _resolve_agenda_target(parsed_query, conversation_context=conversation_context)
+    if target.get("status") != "resolved":
+        return _respond_for_agenda_target_resolution(parsed_query, target, action_text="reprogramar")
+
+    current_item = target["item"]
+    new_date_hint = parsed_query.get("agenda_new_date_hint")
+    new_time_hint = parsed_query.get("agenda_new_time_hint")
+
+    resolved_date = current_item.scheduled_date
+    if new_date_hint:
+        date_resolution = resolve_agenda_date_hint(new_date_hint, today=date.today())
+        if not date_resolution.get("resolved") or not date_resolution.get("target_date"):
+            return _abort_with_context(parsed_query, "Necesito una fecha nueva clara para reprogramar eso.")
+        resolved_date = date_resolution["target_date"]
+
+    if new_time_hint is None:
+        resolved_time = current_item.scheduled_time
+    else:
+        time_resolution = resolve_agenda_time_hint(new_time_hint)
+        if not time_resolution.get("resolved"):
+            return _abort_with_context(parsed_query, "Necesito una hora nueva clara para reprogramar eso.")
+        resolved_time = time_resolution.get("scheduled_time")
+
+    if resolved_date == current_item.scheduled_date and resolved_time == current_item.scheduled_time:
+        return _abort_with_context(parsed_query, "No vi un cambio real de fecha u hora para aplicar en la agenda.")
+
+    result = update_agenda_item_conversational(
+        current_item.id,
+        scheduled_date=resolved_date,
+        scheduled_time=resolved_time,
+    )
+    if not result.get("updated"):
+        return _abort_with_context(parsed_query, "No pude reprogramar ese item de agenda.")
+
+    parsed_query["_conversation_context"] = _build_agenda_item_context(
+        parsed_query,
+        result,
+        query_scope="updated_item",
+    )
+    response = (
+        f"Listo: reprograme '{result['title']}'. "
+        f"Nueva fecha: {result['scheduled_date'].isoformat()}. "
+        f"Nueva hora: {result['scheduled_time'].strftime('%H:%M') if result.get('scheduled_time') else 'sin hora'}."
+    )
+    _set_audit_trace(
+        parsed_query,
+        user_query=user_query,
+        response=response,
+        action_status="executed",
+        action_type="agenda_update",
+        affected_entity={"scope": "agenda", "id": result["agenda_item_id"], "name": result["title"]},
+    )
+    return response
+
+
+def _handle_agenda_delete_intent(
+    parsed_query: dict,
+    *,
+    user_query: str | None,
+    conversation_context: dict | None,
+) -> str:
+    target = _resolve_agenda_target(parsed_query, conversation_context=conversation_context)
+    if target.get("status") != "resolved":
+        return _respond_for_agenda_target_resolution(parsed_query, target, action_text="borrar")
+
+    current_item = target["item"]
+    result = delete_agenda_item_conversational(current_item.id)
+    if not result.get("deleted"):
+        return _abort_with_context(parsed_query, "No pude borrar ese item de agenda.")
+
+    parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "agenda")
+    response = f"Listo: elimine '{result['title']}' de tu agenda."
+    _set_audit_trace(
+        parsed_query,
+        user_query=user_query,
+        response=response,
+        action_status="executed",
+        action_type="agenda_delete",
+        affected_entity={"scope": "agenda", "id": result["agenda_item_id"], "name": result["title"]},
+    )
+    return response
+
+
+def _resolve_agenda_target(parsed_query: dict, *, conversation_context: dict | None) -> dict:
+    context = conversation_context or {}
+    agenda_context = context.get("agenda_context") if isinstance(context, dict) and context.get("_isolated") else {}
+    all_items = get_all_agenda_items()
+
+    if parsed_query.get("agenda_use_context") and isinstance(agenda_context, dict):
+        context_item_id = agenda_context.get("agenda_item_id")
+        context_title = agenda_context.get("title")
+        context_date = agenda_context.get("anchor_date")
+        context_time = agenda_context.get("anchor_time")
+        for item in all_items:
+            if context_item_id and str(item.id) == str(context_item_id):
+                return {"status": "resolved", "item": item}
+            if context_title and item.title.lower() == str(context_title).lower():
+                if not context_date or item.scheduled_date.isoformat() == context_date:
+                    if not context_time or (
+                        item.scheduled_time and item.scheduled_time.strftime("%H:%M") == context_time
+                    ):
+                        return {"status": "resolved", "item": item}
+
+    target_title = (parsed_query.get("agenda_target_title") or "").strip().lower()
+    target_kind = parsed_query.get("agenda_target_kind")
+    target_date_hint = parsed_query.get("agenda_target_date_hint")
+    target_time_hint = parsed_query.get("agenda_target_time_hint")
+
+    target_date = None
+    if target_date_hint:
+        date_resolution = resolve_agenda_date_hint(target_date_hint, today=date.today())
+        if date_resolution.get("resolved"):
+            target_date = date_resolution.get("target_date")
+
+    target_time = None
+    if target_time_hint:
+        time_resolution = resolve_agenda_time_hint(target_time_hint)
+        if time_resolution.get("resolved"):
+            target_time = time_resolution.get("scheduled_time")
+
+    candidates = []
+    for item in all_items:
+        score = 0
+        if target_kind and getattr(item, "kind", None) != target_kind:
+            continue
+        if target_title:
+            normalized_title = str(getattr(item, "title", "")).lower()
+            if target_title == normalized_title:
+                score += 5
+            elif target_title in normalized_title:
+                score += 3
+            else:
+                continue
+        if target_date:
+            if getattr(item, "scheduled_date", None) == target_date:
+                score += 3
+            else:
+                continue
+        if target_time:
+            if getattr(item, "scheduled_time", None) == target_time:
+                score += 2
+            else:
+                continue
+        if score > 0:
+            candidates.append((score, item))
+
+    candidates.sort(key=lambda entry: (-entry[0], entry[1].scheduled_date, entry[1].scheduled_time or datetime.max.time(), entry[1].id))
+    if not candidates:
+        return {"status": "not_found"}
+
+    best_score = candidates[0][0]
+    best_items = [item for score, item in candidates if score == best_score]
+    if len(best_items) == 1:
+        return {"status": "resolved", "item": best_items[0]}
+
+    return {"status": "ambiguous", "candidates": best_items[:4]}
+
+
+def _respond_for_agenda_target_resolution(parsed_query: dict, resolution: dict, *, action_text: str) -> str:
+    status = resolution.get("status")
+    if status == "not_found":
+        return _abort_with_context(parsed_query, f"No encontre un evento o recordatorio claro para {action_text}.")
+
+    candidates = resolution.get("candidates") or []
+    if candidates:
+        lines = [f"Encontre mas de un item posible para {action_text}. Decime cual de estos queres tocar:"]
+        for item in candidates[:4]:
+            lines.append(f"- {_format_agenda_item_label(item)}")
+        return _abort_with_context(parsed_query, "\n".join(lines))
+
+    return _abort_with_context(parsed_query, f"No tengo contexto suficiente para {action_text} ese item de agenda.")
+
+
+def _build_agenda_item_context(parsed_query: dict, item_data, *, query_scope: str) -> dict:
+    if isinstance(item_data, dict):
+        agenda_item_id = item_data.get("agenda_item_id")
+        title = item_data.get("title")
+        scheduled_date = item_data.get("scheduled_date")
+        scheduled_time = item_data.get("scheduled_time")
+        kind = item_data.get("kind")
+    else:
+        agenda_item_id = getattr(item_data, "id", None)
+        title = getattr(item_data, "title", None)
+        scheduled_date = getattr(item_data, "scheduled_date", None)
+        scheduled_time = getattr(item_data, "scheduled_time", None)
+        kind = getattr(item_data, "kind", None)
+
+    return {
+        **_base_conversation_context(parsed_query, "agenda"),
+        "agenda_context": {
+            "query_scope": query_scope,
+            "agenda_item_id": agenda_item_id,
+            "anchor_date": scheduled_date.isoformat() if scheduled_date else None,
+            "anchor_time": scheduled_time.strftime("%H:%M") if scheduled_time else None,
+            "kind": kind,
+            "title": title,
+        },
+    }
+
+
+def _format_agenda_item_label(item) -> str:
+    kind_label = "recordatorio" if getattr(item, "kind", None) == "reminder" else "evento"
+    time_label = item.scheduled_time.strftime("%H:%M") if getattr(item, "scheduled_time", None) else "sin hora"
+    return f"{item.title} | {kind_label} | {item.scheduled_date.isoformat()} | {time_label}"
+
+
 def _handle_agenda_query_intent(
     parsed_query: dict,
     *,
@@ -645,6 +883,7 @@ def _handle_agenda_query_intent(
         items = get_agenda_items_for_date(target_date)
         after_time = resolve_agenda_time_hint(anchor_time).get("scheduled_time") if anchor_time else now.time().replace(second=0, microsecond=0)
         filtered = [item for item in items if item.scheduled_time and item.scheduled_time > after_time]
+        parsed_query["_agenda_items_for_context"] = filtered
         parsed_query["_conversation_context"] = _build_agenda_context(
             parsed_query,
             query_scope="after_current",
@@ -665,6 +904,7 @@ def _handle_agenda_query_intent(
 
     if query_scope == "this_week":
         items = get_agenda_items_between_dates(date_resolution["start_date"], date_resolution["end_date"])
+        parsed_query["_agenda_items_for_context"] = items
         parsed_query["_conversation_context"] = _build_agenda_context(
             parsed_query,
             query_scope="this_week",
@@ -684,6 +924,7 @@ def _handle_agenda_query_intent(
 
     if query_scope == "rest_of_day":
         filtered = [item for item in items if item.scheduled_time is None or item.scheduled_time >= now.time()]
+        parsed_query["_agenda_items_for_context"] = filtered
         parsed_query["_conversation_context"] = _build_agenda_context(
             parsed_query,
             query_scope="rest_of_day",
@@ -703,6 +944,7 @@ def _handle_agenda_query_intent(
             return _abort_with_context(parsed_query, "Necesito una hora clara para revisar la agenda en ese momento.")
         target_time = time_resolution["scheduled_time"]
         filtered = [item for item in items if item.scheduled_time == target_time]
+        parsed_query["_agenda_items_for_context"] = filtered
         parsed_query["_conversation_context"] = _build_agenda_context(
             parsed_query,
             query_scope="at_time",
@@ -716,6 +958,7 @@ def _handle_agenda_query_intent(
             empty_message=f"No tenes nada agendado a las {target_time.strftime('%H:%M')}.",
         )
 
+    parsed_query["_agenda_items_for_context"] = items
     parsed_query["_conversation_context"] = _build_agenda_context(
         parsed_query,
         query_scope=query_scope,
@@ -749,7 +992,7 @@ def _handle_agenda_query_intent(
 
 
 def _build_agenda_context(parsed_query: dict, *, query_scope: str, target_date: date, anchor_time: str | None) -> dict:
-    return {
+    context = {
         **_base_conversation_context(parsed_query, "agenda"),
         "agenda_context": {
             "query_scope": query_scope,
@@ -757,6 +1000,13 @@ def _build_agenda_context(parsed_query: dict, *, query_scope: str, target_date: 
             "anchor_time": anchor_time,
         },
     }
+    items = parsed_query.get("_agenda_items_for_context") or []
+    if isinstance(items, list) and len(items) == 1:
+        item = items[0]
+        context["agenda_context"]["agenda_item_id"] = getattr(item, "id", None)
+        context["agenda_context"]["title"] = getattr(item, "title", None)
+        context["agenda_context"]["kind"] = getattr(item, "kind", None)
+    return context
 
 
 def _format_agenda_summary_response(
@@ -769,6 +1019,7 @@ def _format_agenda_summary_response(
 ) -> str:
     if not items:
         response = empty_message
+        parsed_query["_agenda_items_for_context"] = []
         _set_audit_trace(
             parsed_query,
             user_query=parsed_query.get("_last_user_query"),
@@ -779,6 +1030,7 @@ def _format_agenda_summary_response(
         return response
 
     lines = [heading]
+    parsed_query["_agenda_items_for_context"] = list(items)
     for item in items:
         time_label = item.scheduled_time.strftime("%H:%M") if item.scheduled_time else "Sin hora"
         kind_label = "Recordatorio" if getattr(item, "kind", "event") == "reminder" else "Evento"
@@ -3734,6 +3986,10 @@ def _friendly_audit_action_label(trace: dict) -> str:
         return f"Recien agregue la tarea nueva '{affected_name}'."
     if action_type in {"agenda_event", "agenda_reminder"} and affected_name:
         return f"Recien guarde '{affected_name}' en tu agenda."
+    if action_type == "agenda_update" and affected_name:
+        return f"Recien reprograme '{affected_name}' en tu agenda."
+    if action_type == "agenda_delete" and affected_name:
+        return f"Recien elimine '{affected_name}' de tu agenda."
     if action_type == "description" and affected_name:
         return f"Recien actualice el proyecto '{affected_name}'."
     if action_type == "status" and affected_name:
@@ -3766,6 +4022,8 @@ def _friendly_audit_understood_label(trace: dict) -> str:
         return "Entendi que querias crear trabajo nuevo."
     if intent == "create_agenda_item":
         return "Entendi que querias guardar un evento o recordatorio personal."
+    if intent in {"update_agenda_item", "delete_agenda_item"}:
+        return "Entendi que querias cambiar un item de tu agenda personal."
     if intent == "get_agenda_items_summary":
         return "Entendi que querias revisar tu agenda personal."
     if intent == "get_due_tasks_summary":
