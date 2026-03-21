@@ -1,5 +1,5 @@
 from app.config import USE_LLM_PARSER
-from app.services.llm_parser_service import parse_query_with_llm
+from app.services.llm_parser_service import parse_actions_with_llm
 from app.services.query_parser_service import parse_user_query as parse_user_query_rules
 
 EXECUTIVE_INTENTS = {
@@ -24,6 +24,10 @@ EXECUTIVE_INTENTS = {
     "get_due_tasks_summary",
     "get_overdue_tasks_summary",
     "get_missing_due_date_summary",
+    "create_agenda_item",
+    "get_agenda_items_summary",
+    "update_agenda_item",
+    "delete_agenda_item",
 }
 
 CLARIFICATION_INTENTS = {
@@ -48,7 +52,8 @@ def parse_user_query_hybrid(query: str) -> dict:
         rules_result["_parser_source"] = "rules"
         return rules_result
 
-    llm_result = parse_query_with_llm(query)
+    llm_actions = parse_actions_with_llm(query)
+    llm_result = _pick_primary_action(llm_actions)
     llm_intent = (llm_result or {}).get("intent", "unknown")
 
     if _should_prefer_rules(query, rules_result, llm_result):
@@ -58,6 +63,7 @@ def parse_user_query_hybrid(query: str) -> dict:
         return rules_result
 
     if llm_result and llm_intent not in (None, "", "unknown"):
+        llm_result["_actions"] = llm_actions
         llm_result["_parser_decision"] = "llm_accepted"
         return llm_result
 
@@ -65,6 +71,15 @@ def parse_user_query_hybrid(query: str) -> dict:
     if llm_result is not None:
         rules_result["_parser_decision"] = "llm_rejected"
     return rules_result
+
+
+def _pick_primary_action(actions: list[dict] | None) -> dict | None:
+    if not actions:
+        return None
+    for action in actions:
+        if action.get("intent") not in (None, "", "unknown"):
+            return dict(action)
+    return dict(actions[0]) if actions else None
 
 
 def _should_prefer_rules(query: str, rules_result: dict, llm_result: dict | None) -> bool:

@@ -44,6 +44,10 @@ ALLOWED_INTENTS = {
     "get_due_tasks_summary",
     "get_overdue_tasks_summary",
     "get_missing_due_date_summary",
+    "create_agenda_item",
+    "get_agenda_items_summary",
+    "update_agenda_item",
+    "delete_agenda_item",
     "compound_query",
     "clarify_entity_reference",
     "create_task",
@@ -62,11 +66,14 @@ ALLOWED_INTENTS = {
     "get_today_queries",
     "get_today_changes",
     "get_last_interaction",
+    "create_client",
+    "telegram_channel_command",
     "unknown",
 }
 
 EMPTY_PAYLOAD = {
     "intent": "unknown",
+    "command": None,
     "client_name": None,
     "project_name": None,
     "task_name": None,
@@ -90,6 +97,19 @@ EMPTY_PAYLOAD = {
     "due_hint": None,
     "time_scope": None,
     "temporal_focus": None,
+    "agenda_kind": None,
+    "agenda_date_hint": None,
+    "agenda_time_hint": None,
+    "agenda_title": None,
+    "agenda_query_scope": None,
+    "agenda_boolean_query": None,
+    "agenda_target_title": None,
+    "agenda_target_date_hint": None,
+    "agenda_target_time_hint": None,
+    "agenda_target_kind": None,
+    "agenda_use_context": None,
+    "agenda_new_date_hint": None,
+    "agenda_new_time_hint": None,
 }
 
 EXAMPLES_BLOCK = """
@@ -530,7 +550,7 @@ JSON:
 
 SYSTEM_PROMPT = f"""
 Sos un parser estricto de lenguaje natural para una agenda operativa.
-Tu trabajo es convertir la consulta del usuario en UN SOLO JSON valido.
+Tu trabajo es convertir la consulta del usuario en una LISTA JSON valida de acciones.
 
 Reglas:
 1. Responde SOLO JSON.
@@ -545,6 +565,9 @@ Reglas:
 10. Si el usuario dice "esta tarea", "este proyecto" o "este cliente", conserva esa referencia textual en task_name, project_name o client_name.
 11. Para "subile la prioridad", usa priority_direction = "up".
 12. Para notas operativas, usa intent = "add_task_note" y completa last_note.
+13. Si hay multiples pedidos en el mismo texto, devolve multiples acciones ordenadas secuencialmente.
+14. Usa intent = "create_client" si el usuario pide crear un cliente.
+15. Usa intent = "telegram_channel_command" y command en ["/start","/help","/reset","/status","/whoami"] si detectas un comando de canal.
 
 Intentos permitidos:
 - get_active_projects
@@ -592,31 +615,40 @@ Intentos permitidos:
 - get_today_queries
 - get_today_changes
 - get_last_interaction
+- create_client
+- telegram_channel_command
 - unknown
 
-Schema exacto:
-{{
-  "intent": "unknown",
-  "client_name": null,
-  "project_name": null,
-  "task_name": null,
-  "task_id": null,
-  "project_id": null,
-  "content": null,
-  "new_status": null,
-  "new_priority": null,
-  "priority_direction": null,
-  "next_action": null,
-  "last_note": null,
-  "entity_hint": null,
-  "recommendation_focus": null,
-  "followup_focus": null,
-  "filter_mode": null,
-  "rephrase_style": null,
-  "due_hint": null,
-  "time_scope": null,
-  "temporal_focus": null
-}}
+Formato exacto de salida:
+[
+  {{
+    "intent": "unknown",
+    "command": null,
+    "client_name": null,
+    "project_name": null,
+    "task_name": null,
+    "task_id": null,
+    "project_id": null,
+    "content": null,
+    "new_status": null,
+    "new_priority": null,
+    "priority_direction": null,
+    "next_action": null,
+    "last_note": null,
+    "entity_hint": null,
+    "recommendation_focus": null,
+    "followup_focus": null,
+    "filter_mode": null,
+    "rephrase_style": null,
+    "due_hint": null,
+    "time_scope": null,
+    "temporal_focus": null,
+    "agenda_kind": null,
+    "agenda_date_hint": null,
+    "agenda_time_hint": null,
+    "agenda_title": null
+  }}
+]
 
 {EXAMPLES_BLOCK}
 """.strip()
@@ -651,10 +683,30 @@ def _extract_first_json_object(text: str) -> str | None:
     return None
 
 
+def _extract_first_json_array(text: str) -> str | None:
+    start = text.find("[")
+    if start == -1:
+        return None
+
+    depth = 0
+    for i in range(start, len(text)):
+        char = text[i]
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
 def _clean_model_output(text: str) -> str | None:
     text = text.strip()
     text = _strip_think_blocks(text)
     text = _strip_code_fences(text)
+    array_payload = _extract_first_json_array(text)
+    if array_payload:
+        return array_payload
     return _extract_first_json_object(text)
 
 
@@ -687,6 +739,7 @@ def _validate_payload_shape(payload: dict[str, Any]) -> dict[str, Any] | None:
             clean[key] = payload[key]
 
     clean["intent"] = _normalize_nullable_string(clean.get("intent")) or "unknown"
+    clean["command"] = _normalize_nullable_string(clean.get("command"))
     clean["client_name"] = _normalize_nullable_string(clean.get("client_name"))
     clean["project_name"] = _normalize_nullable_string(clean.get("project_name"))
     clean["task_name"] = _normalize_nullable_string(clean.get("task_name"))
@@ -710,6 +763,9 @@ def _validate_payload_shape(payload: dict[str, Any]) -> dict[str, Any] | None:
 
     if clean["intent"] not in ALLOWED_INTENTS:
         return None
+    if clean["intent"] == "telegram_channel_command":
+        if clean.get("command") not in {"/start", "/help", "/reset", "/status", "/whoami"}:
+            return None
 
     return clean
 
@@ -772,6 +828,14 @@ def _coerce_semantics(payload: dict[str, Any], user_query: str) -> dict[str, Any
             payload["intent"] = "unknown"
         if not project_name and not payload.get("entity_hint"):
             payload["project_name"] = "este proyecto"
+
+    if intent == "create_client":
+        if not client_name:
+            payload["intent"] = "unknown"
+
+    if intent == "telegram_channel_command":
+        if payload.get("command") not in {"/start", "/help", "/reset", "/status", "/whoami"}:
+            payload["intent"] = "unknown"
 
     if intent == "compound_query":
         payload["intent"] = "unknown"
@@ -889,7 +953,7 @@ def _coerce_semantics(payload: dict[str, Any], user_query: str) -> dict[str, Any
     return payload
 
 
-def parse_query_with_llm(user_query: str) -> dict[str, Any] | None:
+def parse_actions_with_llm(user_query: str) -> list[dict[str, Any]]:
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LLM_API_KEY}",
@@ -902,7 +966,7 @@ def parse_query_with_llm(user_query: str) -> dict[str, Any] | None:
             {"role": "user", "content": user_query},
         ],
         "temperature": 0,
-        "max_tokens": 260,
+        "max_tokens": 700,
     }
 
     try:
@@ -918,20 +982,30 @@ def parse_query_with_llm(user_query: str) -> dict[str, Any] | None:
         raw_content = data["choices"][0]["message"]["content"]
         cleaned = _clean_model_output(raw_content)
         if not cleaned:
-            return None
+            return []
 
         parsed = json.loads(cleaned)
-        validated = _validate_payload_shape(parsed)
-        if not validated:
-            return None
-
-        validated = _coerce_semantics(validated, user_query)
-        validated = _validate_payload_shape(validated)
-        if not validated:
-            return None
-
-        validated["_parser_source"] = "llm"
-        return validated
+        candidates = parsed if isinstance(parsed, list) else [parsed]
+        actions: list[dict[str, Any]] = []
+        for candidate in candidates:
+            validated = _validate_payload_shape(candidate)
+            if not validated:
+                continue
+            validated = _coerce_semantics(validated, user_query)
+            validated = _validate_payload_shape(validated)
+            if not validated:
+                continue
+            validated["_parser_source"] = "llm"
+            actions.append(validated)
+        return actions
 
     except Exception:
-        return None
+        return []
+
+
+def parse_query_with_llm(user_query: str) -> dict[str, Any] | None:
+    actions = parse_actions_with_llm(user_query)
+    for action in actions:
+        if action.get("intent") not in (None, "", "unknown"):
+            return action
+    return actions[0] if actions else None

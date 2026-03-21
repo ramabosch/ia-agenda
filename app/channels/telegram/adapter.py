@@ -5,6 +5,8 @@ from copy import deepcopy
 
 from app.channels.telegram.context_store import InMemoryTelegramContextStore
 from app.services.conversation_runtime_service import process_conversation_turn
+from app.services.llm_parser_service import parse_actions_with_llm
+from app.services.assistant_orchestrator_service import AssistantOrchestratorService
 
 
 def get_telegram_bot_token(*, required: bool = False) -> str | None:
@@ -120,9 +122,11 @@ class TelegramChannelAdapter:
         self,
         *,
         context_store: InMemoryTelegramContextStore | None = None,
+        orchestrator: AssistantOrchestratorService | None = None,
         persist_log: bool = True,
     ):
         self.context_store = context_store or InMemoryTelegramContextStore()
+        self.orchestrator = orchestrator or AssistantOrchestratorService()
         self.persist_log = persist_log
 
     def handle_incoming_text(
@@ -154,6 +158,64 @@ class TelegramChannelAdapter:
 
         current_context = self.context_store.get_context(effective_conversation_key)
         normalized_text = normalize_telegram_user_text(text)
+        parsed_actions = parse_actions_with_llm(normalized_text)
+
+        if parsed_actions:
+            command_responses: list[str] = []
+            non_command_actions: list[dict] = []
+            for action in parsed_actions:
+                action_intent = action.get("intent")
+                if action_intent == "telegram_channel_command" and action.get("command"):
+                    command_result = self._handle_command(
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        chat_type=chat_type,
+                        message_thread_id=message_thread_id,
+                        conversation_key=effective_conversation_key,
+                        command=action.get("command"),
+                    )
+                    command_responses.append(command_result.get("response_text") or "")
+                else:
+                    non_command_actions.append(action)
+
+            orchestration = self.orchestrator.execute_actions(
+                non_command_actions,
+                conversation_context=current_context,
+            ) if non_command_actions else {
+                "reports": [],
+                "conversation_context": current_context,
+            }
+            updated_context = orchestration.get("conversation_context") or {}
+            self.context_store.save_context(effective_conversation_key, updated_context)
+            response_text = _build_friendly_telegram_summary(
+                reports=orchestration.get("reports") or [],
+                command_responses=command_responses,
+            )
+            if response_text:
+                return {
+                    "channel": "telegram",
+                    "chat_id": str(chat_id),
+                    "user_id": str(user_id) if user_id not in (None, "") else None,
+                    "chat_type": chat_type,
+                    "message_thread_id": str(message_thread_id) if message_thread_id not in (None, "") else None,
+                    "conversation_key": effective_conversation_key,
+                    "input_text": text,
+                    "normalized_input_text": normalized_text,
+                    "response_text": response_text,
+                    "parsed_query": {
+                        "intent": "assistant_orchestration",
+                        "actions": parsed_actions,
+                        "_parser_source": "llm",
+                    },
+                    "conversation_context": deepcopy(updated_context),
+                    "audit_trace": {},
+                    "resolved_references": {},
+                    "send_message_payload": {
+                        "chat_id": str(chat_id),
+                        "text": response_text,
+                    },
+                }
+
         result = process_conversation_turn(
             normalized_text,
             conversation_context=current_context,
@@ -283,3 +345,22 @@ def _context_entity_name(context: dict | None) -> str | None:
         item = context.get(scope) or {}
         return item.get("name")
     return None
+
+
+def _build_friendly_telegram_summary(*, reports: list[dict], command_responses: list[str]) -> str:
+    lines: list[str] = []
+    ok_messages = [report.get("message") for report in reports if report.get("ok") and report.get("message")]
+    fail_messages = [report.get("message") for report in reports if not report.get("ok") and report.get("message")]
+
+    if ok_messages:
+        lines.append("Listo, avancé con esto:")
+        for message in ok_messages:
+            lines.append(f"- {message}")
+    if fail_messages:
+        lines.append("Quedaron pendientes estos puntos:")
+        for message in fail_messages:
+            lines.append(f"- {message}")
+    for command_text in command_responses:
+        if command_text:
+            lines.append(command_text)
+    return "\n".join(lines).strip()
