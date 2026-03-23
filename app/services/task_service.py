@@ -1,7 +1,7 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from app.db.session import SessionLocal
-from app.repositories import task_repository, task_update_repository
+from app.repositories import client_repository, project_repository, task_repository, task_update_repository
 from app.schemas.enums import TaskPriority
 
 
@@ -52,7 +52,7 @@ def get_all_tasks():
 
 
 def create_task_conversational(
-    project_id: int,
+    project_id: int | None,
     title: str,
     *,
     priority: str = "media",
@@ -60,12 +60,44 @@ def create_task_conversational(
     due_date: date | None = None,
     last_note: str | None = None,
     next_action: str | None = None,
+    project_name: str | None = None,
 ):
     db = SessionLocal()
     try:
+        target_project = None
+        requested_project_name = (project_name or "").strip() or None
+        force_inbox = _looks_like_inbox_reference(requested_project_name)
+
+        if project_id and not force_inbox:
+            target_project = project_repository.get_project_by_id(db, int(project_id))
+
+        used_inbox = force_inbox or target_project is None
+        if used_inbox:
+            target_project = _get_or_create_inbox_project(db)
+
+        duplicate_task = task_repository.find_recent_open_duplicate_task(
+            db,
+            project_id=target_project.id,
+            title=title.strip(),
+            created_after=datetime.utcnow() - timedelta(days=1),
+        )
+        if duplicate_task:
+            return {
+                "created": False,
+                "duplicate": True,
+                "task_id": duplicate_task.id,
+                "task_title": duplicate_task.title,
+                "project_id": duplicate_task.project_id,
+                "project_name": target_project.name,
+                "used_inbox": used_inbox,
+                "requested_project_name": requested_project_name,
+                "field": "task",
+                "task": duplicate_task,
+            }
+
         task = task_repository.create_task(
             db,
-            project_id,
+            target_project.id,
             title.strip(),
             description,
             priority,
@@ -78,10 +110,48 @@ def create_task_conversational(
             "task_id": task.id,
             "task_title": task.title,
             "project_id": task.project_id,
+            "project_name": target_project.name,
+            "used_inbox": used_inbox,
+            "requested_project_name": requested_project_name,
             "field": "task",
             "priority": task.priority,
             "next_action": task.next_action,
             "last_note": task.last_note,
+            "task": task,
+        }
+    finally:
+        db.close()
+
+
+def get_inbox_tasks():
+    db = SessionLocal()
+    try:
+        inbox_project = _get_or_create_inbox_project(db)
+        return task_repository.get_tasks_by_project_id(db, inbox_project.id)
+    finally:
+        db.close()
+
+
+def count_pending_inbox_tasks() -> int:
+    tasks = get_inbox_tasks()
+    return len([task for task in tasks if getattr(task, "status", None) != "hecha"])
+
+
+def is_inbox_reference(value: str | None) -> bool:
+    return _looks_like_inbox_reference(value)
+
+
+def delete_task_conversational(task_id: int):
+    db = SessionLocal()
+    try:
+        task = task_repository.delete_task(db, task_id)
+        if not task:
+            return {"deleted": False, "error": "not_found"}
+        return {
+            "deleted": True,
+            "task_id": task.id,
+            "task_title": task.title,
+            "project_id": task.project_id,
             "task": task,
         }
     finally:
@@ -459,6 +529,33 @@ def add_task_note_conversational(task_id: int, note_content: str):
         db.close()
 
 
+def restore_task_note_conversational(task_id: int, note_content: str | None):
+    db = SessionLocal()
+    try:
+        task = task_repository.get_task_by_id(db, task_id)
+        if not task:
+            return {"updated": False, "error": "not_found"}
+
+        old_note = task.last_note
+        updated_task = task_repository.update_task_context(db, task_id, last_note=note_content)
+        _register_assistant_update(
+            db,
+            task_id=task_id,
+            content=f"Reversion de nota: {old_note or 'vacio'} -> {note_content or 'vacio'}",
+        )
+        return {
+            "updated": True,
+            "task_id": updated_task.id,
+            "task_title": updated_task.title,
+            "field": "last_note",
+            "old_value": old_note,
+            "new_value": updated_task.last_note,
+            "task": updated_task,
+        }
+    finally:
+        db.close()
+
+
 def update_task_next_action_conversational(task_id: int, next_action: str):
     db = SessionLocal()
     try:
@@ -507,7 +604,7 @@ def _build_update_content(field_name: str, old_value: str | None, new_value: str
 
 
 def _resolve_relative_priority(current_priority: str, priority_direction: str | None) -> str | None:
-    if priority_direction != "up":
+    if priority_direction not in {"up", "down"}:
         return None
 
     ordered = [
@@ -519,7 +616,9 @@ def _resolve_relative_priority(current_priority: str, priority_direction: str | 
         return None
 
     current_index = ordered.index(current_priority)
-    return ordered[min(current_index + 1, len(ordered) - 1)]
+    if priority_direction == "up":
+        return ordered[min(current_index + 1, len(ordered) - 1)]
+    return ordered[max(current_index - 1, 0)]
 
 
 def get_executive_task_snapshot(today: date | None = None) -> dict:
@@ -1369,6 +1468,41 @@ def _safe_related(entity, attr: str):
         return getattr(entity, attr, None)
     except Exception:
         return None
+
+
+def _looks_like_inbox_reference(value: str | None) -> bool:
+    return (value or "").strip().lower() == "inbox"
+
+
+def _get_or_create_inbox_project(db):
+    inbox_project = next(
+        (
+            project
+            for project in project_repository.get_all_projects(db)
+            if (project.name or "").strip().lower() == "inbox"
+        ),
+        None,
+    )
+    if inbox_project:
+        return inbox_project
+
+    inbox_client = next(
+        (
+            client
+            for client in client_repository.get_all_clients(db)
+            if (client.name or "").strip().lower() == "agenda ai"
+        ),
+        None,
+    )
+    if inbox_client is None:
+        inbox_client = client_repository.create_client(db, "Agenda AI")
+
+    return project_repository.create_project(
+        db,
+        inbox_client.id,
+        "Inbox",
+        description="Proyecto de captura rapida para tareas sin proyecto claro.",
+    )
 
 
 def _serialize_task_summary_for_recommendation(summary: dict, today: date) -> dict:

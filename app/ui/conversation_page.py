@@ -1,8 +1,6 @@
 import streamlit as st
 
-from app.services.conversation_service import save_conversation
-from app.services.hybrid_parser_service import parse_user_query_hybrid
-from app.services.query_response_service import build_response_from_query
+from app.services.conversation_runtime_service import process_conversation_turn
 
 
 def render_conversation_page():
@@ -125,15 +123,14 @@ def render_conversation_page():
             return
 
         current_context = st.session_state.get("conversation_context", {})
-        parsed_query = parse_user_query_hybrid(user_query)
-        response = build_response_from_query(parsed_query, user_query=user_query, conversation_context=current_context)
-        st.session_state["conversation_context"] = parsed_query.get("_conversation_context", {})
-
-        save_conversation(
-            user_input=user_query,
-            parsed_intent=str(parsed_query),
-            response_output=response,
+        result = process_conversation_turn(
+            user_query,
+            conversation_context=current_context,
+            persist_log=True,
         )
+        parsed_query = result["parsed_query"]
+        response = result["response_text"]
+        st.session_state["conversation_context"] = result["conversation_context"]
 
         st.subheader("Respuesta del asistente")
         st.write(response)

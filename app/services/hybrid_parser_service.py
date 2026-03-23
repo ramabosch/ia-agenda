@@ -41,7 +41,12 @@ AUDIT_INTENTS = {
 SUMMARY_INTENTS = {
     "get_operational_summary",
     "compound_query",
+    "expand_context",
 }
+
+
+def parse_query_with_llm(query: str) -> dict | None:
+    return _pick_primary_action(parse_actions_with_llm(query))
 
 
 def parse_user_query_hybrid(query: str) -> dict:
@@ -52,8 +57,8 @@ def parse_user_query_hybrid(query: str) -> dict:
         rules_result["_parser_source"] = "rules"
         return rules_result
 
+    llm_result = parse_query_with_llm(query)
     llm_actions = parse_actions_with_llm(query)
-    llm_result = _pick_primary_action(llm_actions)
     llm_intent = (llm_result or {}).get("intent", "unknown")
 
     if _should_prefer_rules(query, rules_result, llm_result):

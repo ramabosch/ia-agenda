@@ -15,6 +15,8 @@ from app.services.agenda_service import (
     resolve_agenda_time_hint,
     update_agenda_item_conversational,
 )
+from app.services.continuity_service import ContinuityService
+from app.services.identity_service import IdentityService
 from app.services.project_service import (
     add_project_note_conversational,
     get_all_projects,
@@ -25,6 +27,7 @@ from app.services.project_service import (
     get_project_advanced_summary,
     get_project_operational_summary,
     get_projects_by_client_id,
+    restore_project_description_conversational,
 )
 from app.services.reference_resolver import resolve_references
 from app.services.task_service import (
@@ -32,7 +35,9 @@ from app.services.task_service import (
     build_missing_due_date_snapshot_from_tasks,
     build_temporal_task_snapshot_from_tasks,
     build_client_advanced_summary,
+    count_pending_inbox_tasks,
     create_task_conversational,
+    delete_task_conversational,
     build_friction_focus_from_tasks,
     build_recommendation_focus_from_tasks,
     build_task_friction_summary,
@@ -40,6 +45,7 @@ from app.services.task_service import (
     build_task_advanced_summary,
     get_executive_task_snapshot,
     get_followup_task_snapshot,
+    get_inbox_tasks,
     get_missing_due_date_snapshot,
     get_open_tasks_by_client_id,
     get_operational_friction_snapshot,
@@ -49,10 +55,12 @@ from app.services.task_service import (
     get_tasks_by_client_id,
     get_tasks_by_project_id,
     get_tasks_by_status,
+    is_inbox_reference,
     resolve_due_hint,
     update_task_next_action_conversational,
     update_task_priority_conversational,
     update_task_status_conversational,
+    restore_task_note_conversational,
 )
 from app.services.task_update_service import create_task_update
 
@@ -133,6 +141,7 @@ RECOMMENDATION_INTENTS = {
 }
 
 CONTINUITY_INTENTS = {
+    "expand_context",
     "get_followup_focus_summary",
     "get_recommendation_explanation",
     "get_filtered_context_summary",
@@ -160,6 +169,10 @@ AGENDA_QUERY_INTENTS = {
     "get_agenda_items_summary",
 }
 
+DAILY_PULSE_INTENTS = {
+    "get_daily_pulse",
+}
+
 UNSAFE_COMPOUND_INTENTS = CREATION_INTENTS | TASK_UPDATE_INTENTS | {
     "add_task_update",
     "add_task_update_by_name",
@@ -172,7 +185,18 @@ def build_response_from_query(
     conversation_context: dict | None = None,
 ) -> str:
     parsed_query["_last_user_query"] = user_query
+    parsed_query["_identity_profile"] = _resolve_identity_profile(conversation_context)
+    _coerce_inbox_target(parsed_query)
+    continuity_service = _get_continuity_service()
+    continuity_service.intercept_vague_terms(parsed_query)
     intent = parsed_query.get("intent")
+
+    if _is_identity_query(user_query):
+        return _handle_identity_profile_intent(parsed_query, conversation_context=conversation_context)
+
+    if _is_greeting_query(user_query):
+        return _handle_greeting_intent(parsed_query, conversation_context=conversation_context)
+
     if intent == "compound_query":
         return _handle_compound_query(
             parsed_query,
@@ -204,9 +228,19 @@ def build_response_from_query(
             conversation_context=conversation_context,
         )
 
+    if intent in DAILY_PULSE_INTENTS:
+        return _handle_daily_pulse(parsed_query, conversation_context=conversation_context)
+
     resolved_references = _resolve_if_needed(parsed_query, user_query, conversation_context=conversation_context)
 
     if intent == "clarify_entity_reference":
+        continued_response = _continue_pending_action_if_applicable(
+            parsed_query,
+            resolved_references,
+            conversation_context=conversation_context,
+        )
+        if continued_response:
+            return continued_response
         return _handle_clarification_intent(parsed_query, resolved_references)
 
     if intent == "get_operational_summary":
@@ -238,6 +272,7 @@ def build_response_from_query(
             parsed_query,
             user_query=user_query,
             conversation_context=conversation_context,
+            continuity_service=continuity_service,
         )
 
     if intent in AUDIT_INTENTS:
@@ -471,6 +506,19 @@ def build_response_from_query(
         return "\n".join(lines)
 
     if intent == "get_tasks_by_project_name":
+        if is_inbox_reference(parsed_query.get("project_name")):
+            tasks = get_inbox_tasks()
+            parsed_query["_conversation_context"] = {
+                **_base_conversation_context(parsed_query, "project"),
+                "project": {"id": None, "name": "Inbox"},
+            }
+            if not tasks:
+                return "Tu Inbox esta vacio por ahora."
+            lines = ["Esto es lo que tenes en tu Inbox:"]
+            for task in tasks:
+                lines.append(f"- {task.title} | {task.status} | prioridad {task.priority}")
+            return "\n".join(lines)
+
         project_message = _require_resolved_entity(resolved_references, "project", "proyecto", action_text="listar tareas")
         if project_message:
             return _abort_with_context(parsed_query, project_message)
@@ -585,7 +633,8 @@ def build_response_from_query(
         )
 
     parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
-    return (
+    return _with_identity_prefix(
+        parsed_query,
         "No entendi esa consulta todavia.\n\n"
         "Proba con ejemplos como:\n"
         "- que tengo pendiente con CAM\n"
@@ -600,7 +649,7 @@ def _handle_agenda_creation_intent(parsed_query: dict, *, conversation_context: 
     if not title:
         return _abort_with_context(parsed_query, "Necesito el contenido del evento o recordatorio para agendarlo.")
 
-    date_resolution = resolve_agenda_date_hint(parsed_query.get("agenda_date_hint"), today=date.today())
+    date_resolution = _resolve_creation_agenda_date(parsed_query.get("agenda_date_hint"))
     if not date_resolution.get("resolved"):
         return _abort_with_context(parsed_query, "Necesito una fecha clara para agendar eso con seguridad.")
     if date_resolution.get("scope") == "this_week":
@@ -1325,9 +1374,18 @@ def _handle_task_creation(
         conversation_context=conversation_context,
     )
     if isinstance(project, str):
-        parsed_query["_creation_aborted"] = True
-        parsed_query["_creation_result"] = {"error": "project_resolution_failed"}
-        return _abort_with_context(parsed_query, project)
+        lower_project_message = project.lower()
+        if any(
+            marker in lower_project_message
+            for marker in (
+                "varios proyectos",
+                "proyecto actual suficientemente claro",
+            )
+        ):
+            parsed_query["_creation_aborted"] = True
+            parsed_query["_creation_result"] = {"error": "project_resolution_failed"}
+            return _abort_with_context(parsed_query, project)
+        project = None
 
     priority = parsed_query.get("new_priority") or "media"
     next_action = (parsed_query.get("next_action") or "").strip() or None
@@ -1340,19 +1398,31 @@ def _handle_task_creation(
             "temporal_resolution": temporal_resolution,
         }
         return _abort_with_context(parsed_query, temporal_resolution["error_message"])
+    create_kwargs = {
+        "priority": priority,
+        "due_date": temporal_resolution.get("due_date"),
+        "next_action": next_action,
+        "last_note": note_content,
+    }
+    if project is None or parsed_query.get("project_name"):
+        create_kwargs["project_name"] = parsed_query.get("project_name")
+
     result = create_task_conversational(
-        project["id"],
+        project["id"] if project else None,
         title,
-        priority=priority,
-        due_date=temporal_resolution.get("due_date"),
-        next_action=next_action,
-        last_note=note_content,
+        **create_kwargs,
     )
 
     parsed_query["_creation_target_scope"] = "project"
     parsed_query["_creation_result"] = result
     parsed_query["_creation_real"] = bool(result.get("created"))
     if not result.get("created"):
+        if result.get("duplicate"):
+            parsed_query["_creation_aborted"] = True
+            return _abort_with_context(
+                parsed_query,
+                f"Ya tengo una tarea abierta muy reciente con ese nombre en {result.get('project_name') or 'ese proyecto'}: '{result.get('task_title')}'. Decime si queres que la actualice en vez de crear otra.",
+            )
         parsed_query["_creation_aborted"] = True
         return _abort_with_context(parsed_query, "No pude crear la tarea en ese proyecto.")
 
@@ -1361,15 +1431,27 @@ def _handle_task_creation(
     parsed_query["_update_result"] = result
     parsed_query["_conversation_context"] = {
         **_base_conversation_context(parsed_query, "task"),
-        "project": {"id": project["id"], "name": project["name"]},
+        "project": {"id": result.get("project_id"), "name": result.get("project_name")},
         "task": {"id": result["task_id"], "name": result["task_title"]},
     }
 
-    parts = [
-        f"Listo: cree la tarea nueva '{result['task_title']}'.",
-        f"Proyecto: {project['name']}.",
-        f"Prioridad: {result['priority']}.",
-    ]
+    if result.get("used_inbox"):
+        if result.get("requested_project_name"):
+            parts = [
+                f"Anote '{result['task_title']}' en tu Inbox (no encontre el proyecto '{result['requested_project_name']}').",
+                f"Prioridad: {result['priority']}.",
+            ]
+        else:
+            parts = [
+                f"Anote '{result['task_title']}' en tu Inbox.",
+                f"Prioridad: {result['priority']}.",
+            ]
+    else:
+        parts = [
+            f"Listo: cree la tarea nueva '{result['task_title']}'.",
+            f"Proyecto: {result.get('project_name') or (project or {}).get('name')}.",
+            f"Prioridad: {result['priority']}.",
+        ]
     if next_action:
         parts.append(f"Proxima accion inicial: {next_action}.")
     if temporal_resolution.get("due_date"):
@@ -1384,6 +1466,38 @@ def _handle_task_creation(
         action_status="executed",
         action_type=parsed_query.get("intent"),
         affected_entity={"scope": "task", "id": result["task_id"], "name": result["task_title"]},
+    )
+    return response
+
+
+def _handle_daily_pulse(parsed_query: dict, *, conversation_context: dict | None) -> str:
+    today_value = date.today()
+    profile = _resolve_identity_profile(conversation_context) or {}
+    daily_data = _collect_daily_pulse_data(today_value)
+    response = _format_daily_pulse_message(profile, daily_data)
+
+    parsed_query["_conversation_context"] = {
+        **_base_conversation_context(parsed_query, "daily_pulse"),
+        "daily_pulse": {
+            "date": today_value.isoformat(),
+            "agenda_count": len(daily_data["agenda_items"]),
+            "urgent_count": len(daily_data["urgent_tasks"]),
+            "inbox_count": daily_data["inbox_count"],
+        },
+    }
+    _store_response_snapshot(
+        parsed_query,
+        {
+            "response_kind": "daily_pulse",
+            "scope": "daily_pulse",
+            "entity_name": profile.get("name"),
+            "status_overview": f"Daily pulse {today_value.isoformat()}",
+            "highlights": daily_data["agenda_items"][:3],
+            "blockers": daily_data["urgent_tasks"][:3],
+            "next_steps": [],
+            "recommendation": "Podemos enfocarnos en alguno de estos frentes." if (daily_data["agenda_items"] or daily_data["urgent_tasks"] or daily_data["inbox_count"]) else None,
+            "items": daily_data["agenda_items"][:3] + daily_data["urgent_tasks"][:3],
+        },
     )
     return response
 
@@ -1418,6 +1532,12 @@ def _resolve_creation_project_target(
     *,
     conversation_context: dict | None,
 ) -> dict | str:
+    if is_inbox_reference(parsed_query.get("project_name")) or is_inbox_reference(parsed_query.get("client_name")):
+        return {
+            "id": None,
+            "name": "Inbox",
+        }
+
     project = resolved_references.get("project", {}).get("resolved")
     if project:
         return project
@@ -1747,6 +1867,38 @@ def _build_followup_scoped_response(parsed_query: dict, resolved_references: dic
         )
 
     return None
+
+
+def _continue_pending_action_if_applicable(
+    parsed_query: dict,
+    resolved_references: dict,
+    *,
+    conversation_context: dict | None,
+) -> str | None:
+    pending_action = ((conversation_context or {}).get("pending_action") or {})
+    if not pending_action:
+        return None
+    if resolved_references.get("scope") != "task" or not resolved_references.get("task", {}).get("resolved"):
+        return None
+    if pending_action.get("intent") not in TASK_UPDATE_INTENTS:
+        return None
+
+    synthetic_query = {
+        **pending_action,
+        "_last_user_query": parsed_query.get("_last_user_query"),
+        "_identity_profile": parsed_query.get("_identity_profile"),
+    }
+    response = _handle_task_update_intent(synthetic_query, resolved_references)
+    for key in (
+        "_conversation_context",
+        "_audit_trace",
+        "_update_type",
+        "_update_real",
+        "_update_result",
+    ):
+        if key in synthetic_query:
+            parsed_query[key] = synthetic_query[key]
+    return response
 
 
 def _handle_clarification_intent(parsed_query: dict, resolved_references: dict) -> str:
@@ -2311,6 +2463,7 @@ def _handle_conversational_continuity_intent(
     *,
     user_query: str | None,
     conversation_context: dict | None,
+    continuity_service: ContinuityService | None = None,
 ) -> str:
     context = conversation_context or {}
     snapshot = context.get("response_snapshot") if isinstance(context, dict) else None
@@ -2328,6 +2481,13 @@ def _handle_conversational_continuity_intent(
     parsed_query["_context_source"] = "current" if context.get("_isolated") else "none"
     parsed_query["_context_isolated"] = bool(context.get("_isolated"))
     parsed_query["_recent_context_used"] = context if context.get("_isolated") else {}
+
+    if parsed_query.get("intent") == "expand_context":
+        return (continuity_service or _get_continuity_service()).handle_expansion(
+            parsed_query,
+            user_query=user_query,
+            conversation_context=context,
+        )
 
     if not context or not context.get("_isolated"):
         return _abort_with_context(
@@ -2448,6 +2608,25 @@ def _handle_audit_trace_intent(
     if focus == "decision_reason":
         return _format_audit_reason(trace)
     return _format_audit_recent(trace)
+
+
+def _get_continuity_service() -> ContinuityService:
+    return ContinuityService(
+        abort_with_context=_abort_with_context,
+        base_conversation_context=_base_conversation_context,
+        resolve_if_needed=_resolve_if_needed,
+        handle_operational_summary_intent=_handle_operational_summary_intent,
+        set_audit_trace=_set_audit_trace,
+        store_response_snapshot=_store_response_snapshot,
+        format_next_recommendation_followup=_format_next_recommendation_followup,
+        delete_agenda_item=delete_agenda_item_conversational,
+        delete_task=delete_task_conversational,
+        restore_task_priority=update_task_priority_conversational,
+        restore_task_status=update_task_status_conversational,
+        restore_task_note=restore_task_note_conversational,
+        restore_project_description=restore_project_description_conversational,
+        safe_context_message=_safe_context_message,
+    )
 
 
 def _format_scoped_followup_list(parsed_query: dict, *, scope: str, scope_name: str, tasks: list) -> str:
@@ -3040,13 +3219,13 @@ def _build_clarification_response(resolved_references: dict, prefix: str | None 
     else:
         lines = [prefix or "Necesito que me aclares un poco mas a que te referis."]
     lines.append("Estas son las coincidencias posibles que mejor matchean:")
-    for item in candidates[:4]:
+    for index, item in enumerate(candidates[:4], start=1):
         detail_parts = [_scope_label(item["scope"])]
         if item.get("client_name"):
             detail_parts.append(f"cliente: {item['client_name']}")
         if item.get("project_name"):
             detail_parts.append(f"proyecto: {item['project_name']}")
-        lines.append(f"- {item['name']} ({' | '.join(detail_parts)})")
+        lines.append(f"- {index}. {item['name']} ({' | '.join(detail_parts)})")
     lines.append("")
     lines.append("Si queres, te lo puedo resumir, marcar lo que preocupa o mostrar proximos pasos del que elijas.")
     return "\n".join(lines)
@@ -4118,12 +4297,188 @@ def _format_audit_reason(trace: dict) -> str:
     return f"La razon operativa mas clara que deje fue: {trace.get('summary')}"
 
 
+def _collect_daily_pulse_data(today_value: date) -> dict:
+    agenda_items = list(get_agenda_items_for_date(today_value) or [])
+    overdue_snapshot = get_temporal_task_snapshot("overdue", today=today_value)
+    due_today_snapshot = get_temporal_task_snapshot("today", today=today_value)
+
+    urgent_items: list[dict] = []
+    seen_task_ids: set[int] = set()
+    for item in (overdue_snapshot.get("matched_items") or []) + (due_today_snapshot.get("matched_items") or []):
+        task_id = item.get("task_id")
+        if task_id in seen_task_ids:
+            continue
+        seen_task_ids.add(task_id)
+        urgent_items.append(item)
+
+    inbox_count = count_pending_inbox_tasks()
+    return {
+        "agenda_items": agenda_items,
+        "urgent_tasks": urgent_items,
+        "inbox_count": inbox_count,
+    }
+
+
+def _format_daily_pulse_message(profile: dict, daily_data: dict) -> str:
+    name = (profile.get("name") or "").strip()
+    location = (profile.get("location") or "tu zona").strip()
+    agenda_items = daily_data.get("agenda_items") or []
+    urgent_tasks = daily_data.get("urgent_tasks") or []
+    inbox_count = int(daily_data.get("inbox_count") or 0)
+
+    opening = f"Hola {name}, asi viene tu dia en {location}:" if name else f"Asi viene tu dia en {location}:"
+    lines = [opening]
+    lines.append(f"📅 Agenda: {_format_daily_pulse_agenda_items(agenda_items)}")
+    lines.append(f"✅ Tareas urgentes: {_format_daily_pulse_task_items(urgent_tasks)}")
+    lines.append(f"📥 Inbox: Tenes {inbox_count} temas pendientes de clasificar.")
+    lines.append("")
+    lines.append("Queres que nos enfoquemos en algo de esto?")
+    return "\n".join(lines)
+
+
+def _format_daily_pulse_agenda_items(items: list) -> str:
+    if not items:
+        return "Sin eventos"
+    parts = []
+    for item in items[:4]:
+        scheduled_time = getattr(item, "scheduled_time", None)
+        title = getattr(item, "title", "Sin titulo")
+        kind = getattr(item, "kind", "event")
+        prefix = scheduled_time.strftime("%H:%M") if scheduled_time else "Sin hora"
+        parts.append(f"{prefix} | {kind} | {title}")
+    return " ; ".join(parts)
+
+
+def _format_daily_pulse_task_items(items: list[dict]) -> str:
+    if not items:
+        return "Sin tareas urgentes"
+    parts = []
+    for item in items[:4]:
+        title = item.get("title") or "Sin titulo"
+        due_label = item.get("due_date") or "sin fecha"
+        project_name = item.get("project_name") or "Sin proyecto"
+        parts.append(f"{title} | {project_name} | vence {due_label}")
+    return " ; ".join(parts)
+
+
+def _build_new_session_greeting_line(conversation_context: dict | None, profile: dict | None) -> str | None:
+    context = conversation_context or {}
+    if not context.get("_new_session"):
+        return None
+
+    name = (profile or {}).get("name")
+    agenda_items = list(get_agenda_items_for_date(date.today()) or [])
+    if agenda_items:
+        first_item = agenda_items[0]
+        scheduled_time = getattr(first_item, "scheduled_time", None)
+        time_label = scheduled_time.strftime("%H:%M") if scheduled_time else "sin hora"
+        prefix = f"Hola de nuevo, {name}." if name else "Hola de nuevo."
+        return f"{prefix} Acordate que hoy tenes {getattr(first_item, 'title', 'un compromiso')} de las {time_label}. En que te ayudo ahora?"
+
+    if name:
+        return f"Hola de nuevo, {name}. Hoy no veo eventos en agenda. En que te ayudo ahora?"
+    return "Hola de nuevo. Hoy no veo eventos en agenda. En que te ayudo ahora?"
+
+
+def _resolve_creation_agenda_date(date_hint: str | None) -> dict:
+    today_value = date.today()
+    resolution = resolve_agenda_date_hint(date_hint, today=today_value)
+    if resolution.get("resolved"):
+        return resolution
+
+    normalized = _normalize_simple_temporal_text(date_hint)
+    if normalized == "hoy":
+        return {
+            "resolved": True,
+            "scope": "today",
+            "target_date": today_value,
+            "start_date": today_value,
+            "end_date": today_value,
+            "label": "hoy",
+            "error": None,
+        }
+    if normalized == "manana":
+        target_date = date.fromordinal(today_value.toordinal() + 1)
+        return {
+            "resolved": True,
+            "scope": "tomorrow",
+            "target_date": target_date,
+            "start_date": target_date,
+            "end_date": target_date,
+            "label": "manana",
+            "error": None,
+        }
+    return resolution
+
+
+def _normalize_simple_temporal_text(value: str | None) -> str:
+    raw = (value or "").strip().lower()
+    replacements = {
+        "á": "a",
+        "é": "e",
+        "í": "i",
+        "ó": "o",
+        "ú": "u",
+    }
+    for source, target in replacements.items():
+        raw = raw.replace(source, target)
+    return raw
+
+
+def _handle_identity_profile_intent(parsed_query: dict, *, conversation_context: dict | None) -> str:
+    parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
+    profile = _resolve_identity_profile(conversation_context)
+    if not profile:
+        return _abort_with_context(
+            parsed_query,
+            "Todavia no tengo una identidad de canal clara para decirte quien sos en esta conversacion.",
+        )
+
+    response = (
+        f"Sos {profile['name']}. "
+        f"Rol: {profile['role']}."
+        + (f" Ubicacion: {profile['location']}." if profile.get("location") else "")
+        + (f" Zona horaria: {profile['timezone']}." if profile.get("timezone") else "")
+    )
+    _set_audit_trace(
+        parsed_query,
+        user_query=parsed_query.get("_last_user_query"),
+        response=response,
+        action_status="informational",
+        action_type="identity_lookup",
+    )
+    return response
+
+
+def _handle_greeting_intent(parsed_query: dict, *, conversation_context: dict | None) -> str:
+    parsed_query["_conversation_context"] = _base_conversation_context(parsed_query, "none")
+    profile = _resolve_identity_profile(conversation_context)
+    greeting_line = _build_new_session_greeting_line(conversation_context, profile)
+    if greeting_line:
+        response = greeting_line
+    elif profile:
+        response = f"Hola {profile['name']}. Estoy listo para ayudarte con proyectos, tareas, agenda e Inbox."
+    else:
+        response = "Hola. Estoy listo para ayudarte con proyectos, tareas, agenda e Inbox."
+    _set_audit_trace(
+        parsed_query,
+        user_query=parsed_query.get("_last_user_query"),
+        response=response,
+        action_status="informational",
+        action_type="greeting",
+    )
+    return response
+
+
 def _abort_with_context(parsed_query: dict, message: str) -> str:
     context = _base_conversation_context(parsed_query, "none")
     clarification_candidates = parsed_query.get("_clarification_candidates") or []
     if clarification_candidates:
         context["clarification_candidates"] = clarification_candidates
         context["clarification_reason"] = parsed_query.get("_clarification_reason")
+        pending_action = _extract_pending_action_context(parsed_query)
+        if pending_action:
+            context["pending_action"] = pending_action
         if parsed_query.get("expected_scope"):
             context["clarification_expected_scope"] = parsed_query.get("expected_scope")
         elif parsed_query.get("_candidate_types") and len(parsed_query["_candidate_types"]) == 1:
@@ -4133,10 +4488,79 @@ def _abort_with_context(parsed_query: dict, message: str) -> str:
     _set_audit_trace(
         parsed_query,
         user_query=parsed_query.get("_last_user_query"),
-        response=message,
+        response=_with_identity_prefix(parsed_query, message),
         action_status=action_status,
     )
-    return message
+    return _with_identity_prefix(parsed_query, message)
+
+
+def _extract_pending_action_context(parsed_query: dict) -> dict | None:
+    intent = parsed_query.get("intent")
+    if intent not in TASK_UPDATE_INTENTS:
+        return None
+    return {
+        "intent": intent,
+        "new_status": parsed_query.get("new_status"),
+        "new_priority": parsed_query.get("new_priority"),
+        "priority_direction": parsed_query.get("priority_direction"),
+        "last_note": parsed_query.get("last_note"),
+        "next_action": parsed_query.get("next_action"),
+    }
+
+
+def _resolve_identity_profile(conversation_context: dict | None) -> dict | None:
+    context = conversation_context or {}
+    identity = context.get("channel_identity") or {}
+    telegram_id = identity.get("telegram_id")
+    if telegram_id in (None, ""):
+        return None
+    try:
+        return IdentityService().get_user_profile(int(telegram_id))
+    except Exception:
+        return None
+
+
+def _coerce_inbox_target(parsed_query: dict) -> None:
+    if is_inbox_reference(parsed_query.get("client_name")):
+        parsed_query["client_name"] = None
+        parsed_query["project_name"] = "Inbox"
+        parsed_query["expected_scope"] = "project"
+    elif is_inbox_reference(parsed_query.get("project_name")):
+        parsed_query["project_name"] = "Inbox"
+        parsed_query["expected_scope"] = "project"
+
+
+def _with_identity_prefix(parsed_query: dict, message: str) -> str:
+    profile = (parsed_query or {}).get("_identity_profile") or {}
+    name = (profile.get("name") or "").strip()
+    if not name:
+        return message
+    if message.startswith(f"Hola {name}"):
+        return message
+    if not (
+        message.startswith("No ")
+        or message.startswith("Todavia ")
+        or message.startswith("Necesito ")
+        or message.startswith("No tengo ")
+        or message.startswith("No encontre ")
+        or message.startswith("No pude ")
+    ):
+        return message
+    return f"Hola {name}, {message[:1].lower()}{message[1:]}"
+
+
+def _is_identity_query(user_query: str | None) -> bool:
+    if not user_query:
+        return False
+    normalized = user_query.strip().lower().strip(" ?!¡¿")
+    return normalized in {"quien soy", "quién soy"}
+
+
+def _is_greeting_query(user_query: str | None) -> bool:
+    if not user_query:
+        return False
+    normalized = user_query.strip().lower().strip(" ?!¡¿")
+    return normalized in {"hola", "buen dia", "buen día", "buenas"}
 
 
 def _attach_operational_summary_debug(parsed_query: dict, advanced_summary: dict, scope_override: str | None = None) -> None:

@@ -215,8 +215,10 @@ class TelegramPollingTests(unittest.TestCase):
         first_context = runtime_mock.call_args_list[0].kwargs["conversation_context"]
         second_context = runtime_mock.call_args_list[1].kwargs["conversation_context"]
         third_context = runtime_mock.call_args_list[2].kwargs["conversation_context"]
-        self.assertEqual(first_context, {})
-        self.assertEqual(second_context, {})
+        self.assertEqual(first_context.get("channel_identity", {}).get("telegram_id"), 1)
+        self.assertEqual(second_context.get("channel_identity", {}).get("telegram_id"), 2)
+        self.assertNotIn("marker", first_context)
+        self.assertNotIn("marker", second_context)
         self.assertEqual(third_context.get("marker"), "hola")
 
     def test_polling_keeps_context_isolated_between_threads(self):
@@ -285,8 +287,10 @@ class TelegramPollingTests(unittest.TestCase):
         first_context = runtime_mock.call_args_list[0].kwargs["conversation_context"]
         second_context = runtime_mock.call_args_list[1].kwargs["conversation_context"]
         third_context = runtime_mock.call_args_list[2].kwargs["conversation_context"]
-        self.assertEqual(first_context, {})
-        self.assertEqual(second_context, {})
+        self.assertEqual(first_context.get("channel_identity", {}).get("message_thread_id"), "7")
+        self.assertEqual(second_context.get("channel_identity", {}).get("message_thread_id"), "8")
+        self.assertNotIn("marker", first_context)
+        self.assertNotIn("marker", second_context)
         self.assertEqual(third_context.get("marker"), "hola")
 
     def test_telegram_api_request_surfaces_api_error(self):

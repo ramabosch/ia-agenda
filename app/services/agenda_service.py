@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
+import unicodedata
 
 from app.db import init_db
 from app.db.session import SessionLocal
@@ -261,4 +262,5 @@ def resolve_agenda_time_hint(time_hint: str | None) -> dict:
 
 
 def _normalize_agenda_text(value: str | None) -> str:
-    return (value or "").strip().lower()
+    normalized = unicodedata.normalize("NFKD", (value or "").strip().lower())
+    return "".join(char for char in normalized if not unicodedata.combining(char))

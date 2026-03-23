@@ -15,6 +15,7 @@ class CreationBehaviorTests(unittest.TestCase):
             "task_id": 200,
             "task_title": "definir metricas",
             "project_id": project.id,
+            "project_name": project.name,
             "priority": "media",
             "next_action": None,
             "last_note": None,
@@ -52,6 +53,7 @@ class CreationBehaviorTests(unittest.TestCase):
             "task_id": 201,
             "task_title": "definir metricas",
             "project_id": project.id,
+            "project_name": project.name,
             "priority": "media",
             "next_action": None,
             "last_note": None,
@@ -81,6 +83,7 @@ class CreationBehaviorTests(unittest.TestCase):
             "task_id": 204,
             "task_title": "hacer revision anual",
             "project_id": project.id,
+            "project_name": project.name,
             "priority": "media",
             "next_action": None,
             "last_note": None,
@@ -114,6 +117,7 @@ class CreationBehaviorTests(unittest.TestCase):
             "task_id": 205,
             "task_title": "hacer revision anual",
             "project_id": project.id,
+            "project_name": project.name,
             "priority": "media",
             "next_action": None,
             "last_note": None,
@@ -170,6 +174,7 @@ class CreationBehaviorTests(unittest.TestCase):
             "task_id": 206,
             "task_title": "revisar indicadores",
             "project_id": project.id,
+            "project_name": project.name,
             "priority": "media",
             "next_action": None,
             "last_note": None,
@@ -202,6 +207,7 @@ class CreationBehaviorTests(unittest.TestCase):
             "task_id": 202,
             "task_title": "revisar indicadores",
             "project_id": project.id,
+            "project_name": project.name,
             "priority": "alta",
             "next_action": None,
             "last_note": None,
@@ -334,18 +340,95 @@ class CreationBehaviorTests(unittest.TestCase):
         self.assertIn("varios proyectos", response.lower())
         self.assertFalse(parsed.get("_creation_real", True))
 
-    def test_without_context_does_not_invent_creation_target(self):
+    def test_without_context_falls_back_to_inbox(self):
         project_a = make_project(10, "Dashboard", make_client(1, "CAM"))
         project_b = make_project(11, "Analytics", make_client(2, "Dallas"))
+        create_result = {
+            "created": True,
+            "task_id": 301,
+            "task_title": "revisar indicadores",
+            "project_id": 999,
+            "project_name": "Inbox",
+            "priority": "media",
+            "next_action": None,
+            "last_note": None,
+            "used_inbox": True,
+            "requested_project_name": None,
+        }
         parsed = parse_user_query("crea una tarea para revisar indicadores")
 
         with patch("app.services.query_response_service.get_all_projects", return_value=[project_a, project_b]), patch(
             "app.services.query_response_service.create_task_conversational",
+            return_value=create_result,
         ) as create_mock:
             response = build_response_from_query(parsed, user_query="crea una tarea para revisar indicadores", conversation_context={})
 
-        create_mock.assert_not_called()
-        self.assertIn("no tengo un proyecto claro", response.lower())
+        create_mock.assert_called_once_with(
+            None,
+            "revisar indicadores",
+            priority="media",
+            due_date=None,
+            next_action=None,
+            last_note=None,
+            project_name=None,
+        )
+        self.assertIn("inbox", response.lower())
+
+    def test_create_task_inbox_mentions_missing_project_name(self):
+        parsed = {"intent": "create_task", "project_name": "proyecto fantasma", "task_name": "comprar cafe"}
+        create_result = {
+            "created": True,
+            "task_id": 302,
+            "task_title": "comprar cafe",
+            "project_id": 999,
+            "project_name": "Inbox",
+            "priority": "media",
+            "next_action": None,
+            "last_note": None,
+            "used_inbox": True,
+            "requested_project_name": "proyecto fantasma",
+        }
+
+        with patch("app.services.query_response_service.get_all_projects", return_value=[]), patch(
+            "app.services.query_response_service.create_task_conversational",
+            return_value=create_result,
+        ) as create_mock:
+            response = build_response_from_query(parsed, user_query="agrega una tarea en proyecto fantasma: comprar cafe", conversation_context={})
+
+        create_mock.assert_called_once()
+        self.assertIn("inbox", response.lower())
+        self.assertIn("proyecto fantasma", response.lower())
+
+    def test_show_inbox_uses_safe_inbox_fallback(self):
+        parsed = {"intent": "get_tasks_by_project_name", "project_name": "Inbox"}
+
+        with patch(
+            "app.services.query_response_service.get_inbox_tasks",
+            return_value=[],
+        ):
+            response = build_response_from_query(parsed, user_query="mostrame mi inbox", conversation_context={})
+
+        self.assertIn("inbox", response.lower())
+        self.assertIn("vacio", response.lower())
+
+    def test_duplicate_recent_task_does_not_create_third_copy(self):
+        parsed = {"intent": "create_task", "project_name": "Inbox", "task_name": "comprar cafe"}
+        duplicate_result = {
+            "created": False,
+            "duplicate": True,
+            "task_id": 501,
+            "task_title": "comprar cafe",
+            "project_name": "Inbox",
+        }
+
+        with patch(
+            "app.services.query_response_service.create_task_conversational",
+            return_value=duplicate_result,
+        ):
+            response = build_response_from_query(parsed, user_query="anota tarea: comprar cafe", conversation_context={})
+
+        self.assertIn("ya tengo una tarea abierta muy reciente", response.lower())
+        self.assertIn("comprar cafe", response.lower())
 
     def test_converti_esto_en_tarea_uses_safe_snapshot(self):
         client = make_client(1, "CAM")
@@ -355,6 +438,7 @@ class CreationBehaviorTests(unittest.TestCase):
             "task_id": 203,
             "task_title": "Resolver bloqueo API",
             "project_id": project.id,
+            "project_name": project.name,
             "priority": "media",
             "next_action": None,
             "last_note": None,

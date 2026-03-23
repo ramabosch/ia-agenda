@@ -71,6 +71,28 @@ def add_project_note_conversational(project_id: int, note_content: str):
     finally:
         db.close()
 
+
+def restore_project_description_conversational(project_id: int, description: str | None):
+    db = SessionLocal()
+    try:
+        project = project_repository.get_project_by_id(db, project_id)
+        if not project:
+            return {"updated": False, "error": "not_found"}
+
+        old_value = project.description
+        updated_project = project_repository.update_project_description(db, project_id, description)
+        return {
+            "updated": True,
+            "project_id": updated_project.id,
+            "project_name": updated_project.name,
+            "field": "description",
+            "old_value": old_value,
+            "new_value": updated_project.description,
+            "project": updated_project,
+        }
+    finally:
+        db.close()
+
 def get_project_operational_summary(project_id: int):
     db = SessionLocal()
     try:

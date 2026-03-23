@@ -35,6 +35,16 @@ GENERIC_ENTITY_TERMS = {
 DESCRIPTOR_PREFIXES = ("el de ", "la de ", "el ", "la ")
 TEMPORAL_DAY_TERMS = ("lunes", "martes", "miercoles", "miércoles", "jueves", "viernes", "sabado", "sábado", "domingo")
 AMBIGUOUS_TEMPORAL_TERMS = ("pronto", "mas adelante", "más adelante", "despues", "después", "algun dia", "algún día")
+ORDINAL_REFERENCE_MAP = {
+    "la primera": 0,
+    "el primero": 0,
+    "primera": 0,
+    "primero": 0,
+    "la segunda": 1,
+    "el segundo": 1,
+    "segunda": 1,
+    "segundo": 1,
+}
 
 
 def parse_user_query(query: str) -> dict:
@@ -120,6 +130,15 @@ def _parse_agenda_creation_intents(normalized: str) -> dict | None:
 
 
 def _parse_agenda_query_intents(normalized: str) -> dict | None:
+    if normalized in {
+        "que hay para hoy",
+        "como viene el dia",
+        "resumen de hoy",
+        "que tenemos",
+        "que hay hoy",
+    }:
+        return {"intent": "get_daily_pulse"}
+
     if any(phrase in normalized for phrase in ["que tengo para hoy", "qué tengo para hoy", "que tengo hoy"]):
         return {"intent": "get_agenda_items_summary", "agenda_query_scope": "today", "agenda_date_hint": "hoy"}
 
@@ -333,6 +352,15 @@ def _parse_creation_intents(normalized: str) -> dict | None:
     priority = "alta" if any(token in normalized for token in ["alta prioridad", "prioridad alta", "urgente"]) else None
 
     stripped_normalized, due_hint, time_scope = _extract_supported_due_hint(normalized)
+
+    match = re.search(r"^(?:anota|anota tarea|anotame tarea|anota una tarea)\s*:\s*(.+)$", stripped_normalized)
+    if match:
+        payload = {
+            "intent": "create_task",
+            "task_name": match.group(1).strip(),
+            "new_priority": priority,
+        }
+        return _augment_targeting_payload(_apply_temporal_fields(payload, due_hint, time_scope))
 
     match = re.search(rf"^{create_task_prefix}\s+tarea\s+a\s+(.+?)\s+para\s+(.+)$", stripped_normalized)
     if match:
@@ -650,6 +678,13 @@ def _parse_ambiguity_intents(normalized: str) -> dict | None:
             "contrast_hint": "exclude_other",
         }
 
+    if normalized in {"el otro", "lo otro", "del otro", "de lo otro"}:
+        return {
+            "intent": "clarify_entity_reference",
+            "use_previous_candidates": True,
+            "contrast_hint": "prefer_other",
+        }
+
     words = [token for token in normalized.replace("?", "").split() if token]
     if normalized.startswith("en ") and 1 < len(words) <= 4:
         return _augment_targeting_payload(
@@ -719,8 +754,55 @@ def _parse_ambiguity_intents(normalized: str) -> dict | None:
 
 
 def _parse_read_intents(normalized: str) -> dict | None:
+    ordinal_index = _extract_ordinal_index(normalized)
+    if ordinal_index is not None:
+        return {
+            "intent": "clarify_entity_reference",
+            "use_previous_candidates": True,
+            "ordinal_index": ordinal_index,
+            "entity_hint": normalized,
+        }
+
+    if normalized in {"mostrame mi inbox", "mostrame el inbox", "mostrame inbox", "mi inbox", "inbox"}:
+        return {
+            "intent": "get_tasks_by_project_name",
+            "project_name": "Inbox",
+            "expected_scope": "project",
+        }
+
     if any(phrase in normalized for phrase in ["proyectos activos", "mis proyectos activos", "que proyectos tengo activos"]):
         return {"intent": "get_active_projects"}
+
+    if normalized in {"y de eso que hay", "y de eso que hay?", "y de eso", "y eso", "y eso que hay", "y eso que hay?"}:
+        return {"intent": "expand_context", "expand_mode": "recent_entity_summary"}
+
+    if normalized in {"y de lo otro", "y de lo otro?", "y lo otro", "y de lo otro que hay", "y de lo otro que hay?"}:
+        return {
+            "intent": "expand_context",
+            "expand_mode": "other_entity_summary",
+            "use_previous_candidates": True,
+            "contrast_hint": "prefer_other",
+        }
+
+    if normalized in {"que mas", "que mas?"}:
+        return {"intent": "expand_context", "expand_mode": "more_recommendations"}
+
+    if normalized in {
+        "cancela lo de recien",
+        "cancela lo de recien?",
+        "cancela lo de recién",
+        "cancelá lo de recién",
+        "cancelá lo de recien",
+    }:
+        return {"intent": "expand_context", "expand_mode": "undo_recent_action"}
+
+    if normalized in {"hacelo para el otro tambien", "hacelo para el otro también"}:
+        return {
+            "intent": "expand_context",
+            "expand_mode": "other_entity_action",
+            "use_previous_candidates": True,
+            "contrast_hint": "prefer_other",
+        }
 
     if any(phrase in normalized for phrase in ["que hiciste recien", "que hiciste recién"]):
         return {"intent": "get_audit_trace_summary", "audit_focus": "recent"}
@@ -1549,6 +1631,24 @@ def _parse_task_update_intents(normalized: str) -> dict | None:
             **contextual_payload,
         }
 
+    if normalized.startswith("bajale la prioridad"):
+        match = re.search(r"(?:bajale la prioridad a)\s+(.+)$", normalized)
+        if match:
+            payload = _split_task_scope(match.group(1).strip(), contextual_payload)
+            payload.update(
+                {
+                    "intent": "update_task_priority",
+                    "priority_direction": "down",
+                }
+            )
+            return payload
+        return {
+            "intent": "update_task_priority",
+            "task_name": "eso",
+            "priority_direction": "down",
+            **contextual_payload,
+        }
+
     match = re.search(
         r"tarea\s+(\d+).*(hecha|completada|en progreso|bloqueada|pendiente)$",
         normalized,
@@ -1795,6 +1895,13 @@ def _split_task_scope(raw_target: str, contextual_payload: dict) -> dict:
     payload = dict(contextual_payload)
     target = raw_target.strip()
 
+    ordinal_index = _extract_ordinal_index(target)
+    if ordinal_index is not None:
+        payload["task_name"] = "eso"
+        payload["use_previous_candidates"] = True
+        payload["ordinal_index"] = ordinal_index
+        return payload
+
     if target in CONTEXT_TASK_NAMES:
         payload["task_name"] = target
         return payload
@@ -1811,3 +1918,8 @@ def _split_task_scope(raw_target: str, contextual_payload: dict) -> dict:
 
     payload["task_name"] = target
     return payload
+
+
+def _extract_ordinal_index(value: str | None) -> int | None:
+    normalized = (value or "").strip().lower()
+    return ORDINAL_REFERENCE_MAP.get(normalized)

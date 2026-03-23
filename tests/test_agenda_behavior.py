@@ -49,6 +49,33 @@ class AgendaBehaviorTests(unittest.TestCase):
         self.assertEqual(parsed["_conversation_context"]["scope"], "agenda")
         self.assertEqual(parsed["_audit_trace"]["action_status"], "executed")
 
+    def test_create_event_with_accented_manana_resolves_without_clarification(self):
+        parsed = {
+            "intent": "create_agenda_item",
+            "agenda_kind": "event",
+            "agenda_date_hint": "mañana",
+            "agenda_time_hint": "17:00",
+            "agenda_title": "reunion con cam",
+        }
+
+        with patch(
+            "app.services.query_response_service.create_agenda_item_conversational",
+            return_value={
+                "created": True,
+                "agenda_item_id": 11,
+                "title": "reunion con cam",
+                "scheduled_date": date.today().fromordinal(date.today().toordinal() + 1),
+                "scheduled_time": time(17, 0),
+                "kind": "event",
+                "note": None,
+            },
+        ) as create_mock:
+            response = build_response_from_query(parsed, user_query="Agendá reunión con CAM mañana 17:00")
+
+        self.assertIn("guarde el evento", response.lower())
+        self.assertNotIn("fecha clara", response.lower())
+        self.assertEqual(create_mock.call_args.kwargs["scheduled_date"], date.today().fromordinal(date.today().toordinal() + 1))
+
     def test_create_reminder_for_tomorrow(self):
         parsed = parse_user_query("recordame manana revisar indicadores")
 

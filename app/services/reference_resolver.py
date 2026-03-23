@@ -67,6 +67,10 @@ FOLLOW_UP_MARKERS = (
     "sus proyectos",
     "la del",
     "la de",
+    "que mas",
+    "de eso",
+    "de lo otro",
+    "lo de recien",
 )
 
 
@@ -85,6 +89,7 @@ def resolve_references(
     secondary_descriptor = parsed_query.get("secondary_descriptor")
     use_previous_candidates = bool(parsed_query.get("use_previous_candidates"))
     contrast_hint = parsed_query.get("contrast_hint")
+    ordinal_index = parsed_query.get("ordinal_index")
 
     if not context and allow_global_context:
         context = _load_conversation_context()
@@ -115,6 +120,10 @@ def resolve_references(
 
     if client_result["resolved"] is None and follow_up_mode and context.get("client"):
         client_result = _build_context_result("client", context["client"])
+    elif client_result["resolved"] is None and follow_up_mode:
+        recent_client = _recent_context_item("client", context)
+        if recent_client:
+            client_result = _build_context_result("client", recent_client)
 
     client_id = _resolved_id(client_result)
     project_result = _resolve_project_reference(
@@ -135,6 +144,10 @@ def resolve_references(
 
     if project_result["resolved"] is None and follow_up_mode and context.get("project"):
         project_result = _build_context_result("project", context["project"])
+    elif project_result["resolved"] is None and follow_up_mode:
+        recent_project = _recent_context_item("project", context)
+        if recent_project:
+            project_result = _build_context_result("project", recent_project)
 
     project_id = _resolved_id(project_result)
     if client_id is None and project_result["resolved"] is not None and project_result["resolved"].get("entity"):
@@ -157,11 +170,29 @@ def resolve_references(
         contrast_hint=contrast_hint,
     )
 
+    ordinal_resolution = _resolve_from_ordinal_candidate(
+        context=context,
+        ordinal_index=ordinal_index,
+    )
+    if ordinal_resolution:
+        if ordinal_resolution["scope"] == "client":
+            client_result = ordinal_resolution
+            client_id = _resolved_id(client_result)
+        elif ordinal_resolution["scope"] == "project":
+            project_result = ordinal_resolution
+            project_id = _resolved_id(project_result)
+        elif ordinal_resolution["scope"] == "task":
+            task_result = ordinal_resolution
+
     if task_result["resolved"] is None and task_raw_reference and _looks_like_context_reference(task_raw_reference, "task") and context.get("task"):
         task_result = _build_context_result("task", context["task"])
 
     if task_result["resolved"] is None and follow_up_mode and context.get("task") and _query_allows_task_context(user_query):
         task_result = _build_context_result("task", context["task"])
+    elif task_result["resolved"] is None and follow_up_mode and _query_allows_task_context(user_query):
+        recent_task = _recent_context_item("task", context)
+        if recent_task:
+            task_result = _build_context_result("task", recent_task)
 
     if task_result["resolved"] is not None and task_result["resolved"].get("entity"):
         task_entity = task_result["resolved"]["entity"]
@@ -491,12 +522,19 @@ def _context_scope_bonus(scope: str, candidate: Any, context: dict[str, Any]) ->
 
     if scope == "client" and context.get("client", {}).get("id") == getattr(candidate, "id", None):
         return 0.08
+    if scope == "client":
+        recent_bonus = _recent_context_bonus(scope, getattr(candidate, "id", None), context)
+        if recent_bonus:
+            return recent_bonus
 
     if scope == "project":
         if context.get("project", {}).get("id") == getattr(candidate, "id", None):
             return 0.1
         if context.get("client", {}).get("id") == getattr(candidate, "client_id", None):
             return 0.04
+        recent_bonus = _recent_context_bonus(scope, getattr(candidate, "id", None), context)
+        if recent_bonus:
+            return recent_bonus
 
     if scope == "task":
         if context.get("task", {}).get("id") == getattr(candidate, "id", None):
@@ -507,6 +545,9 @@ def _context_scope_bonus(scope: str, candidate: Any, context: dict[str, Any]) ->
         project_client = _safe_related(project, "client")
         if context.get("client", {}).get("id") == getattr(project_client, "id", None):
             return 0.04
+        recent_bonus = _recent_context_bonus(scope, getattr(candidate, "id", None), context)
+        if recent_bonus:
+            return recent_bonus
 
     return 0.0
 
@@ -556,6 +597,13 @@ def _resolve_from_previous_candidates(
     if chosen_id is None and len(previous_candidates) == 1:
         chosen_id = previous_candidates[0].get("id")
 
+    if chosen_id is None and contrast_hint == "prefer_other":
+        scope_context = context.get(scope, {})
+        current_id = scope_context.get("id")
+        alternatives = [item for item in previous_candidates if item.get("id") != current_id]
+        if len(alternatives) == 1:
+            chosen_id = alternatives[0].get("id")
+
     if chosen_id is None:
         return None
 
@@ -579,6 +627,63 @@ def _resolve_from_previous_candidates(
                 },
                 "matches": [_strip_entity({"id": candidate.id, "name": label, "confidence": 0.97, "scope": scope, "entity": candidate})],
             }
+    return None
+
+
+def _resolve_from_ordinal_candidate(
+    *,
+    context: dict[str, Any],
+    ordinal_index: int | None,
+) -> dict[str, Any] | None:
+    if ordinal_index is None or ordinal_index < 0:
+        return None
+
+    previous_candidates = list(context.get("clarification_candidates") or [])
+    if ordinal_index >= len(previous_candidates):
+        return None
+
+    candidate = previous_candidates[ordinal_index]
+    scope = candidate.get("scope")
+    entity_id = candidate.get("id")
+    entity = _load_entity_by_scope_id(scope, entity_id)
+    if entity is None:
+        return None
+
+    label = entity.title if hasattr(entity, "title") else entity.name
+    return {
+        "scope": scope,
+        "input": candidate.get("name"),
+        "normalized": normalize_entity_text(candidate.get("name")),
+        "confidence": 1.0,
+        "ambiguous": False,
+        "source": "contextual",
+        "resolved": {
+            "id": entity_id,
+            "name": label,
+            "scope": scope,
+            "confidence": 1.0,
+            "entity": entity,
+        },
+        "matches": [candidate],
+    }
+
+
+def _load_entity_by_scope_id(scope: str | None, entity_id: int | None):
+    if scope == "client":
+        for client in get_all_clients():
+            if getattr(client, "id", None) == entity_id:
+                return client
+        return None
+    if scope == "project":
+        for project in get_all_projects():
+            if getattr(project, "id", None) == entity_id:
+                return project
+        return None
+    if scope == "task":
+        for task in get_all_tasks():
+            if getattr(task, "id", None) == entity_id:
+                return task
+        return None
     return None
 
 
@@ -607,16 +712,19 @@ def _coerce_context_reference(
         contextual_name = context.get(scope, {}).get("name")
         if contextual_name:
             return contextual_name
+        recent_name = _recent_context_name(scope, context)
+        if recent_name:
+            return recent_name
         return None
 
     if user_query:
         raw_query = user_query.strip().lower()
         if scope == "client" and any(hint in raw_query for hint in CLIENT_CONTEXT_HINTS):
-            return context.get("client", {}).get("name")
+            return context.get("client", {}).get("name") or _recent_context_name("client", context)
         if scope == "project" and any(hint in raw_query for hint in PROJECT_CONTEXT_HINTS):
-            return context.get("project", {}).get("name")
+            return context.get("project", {}).get("name") or _recent_context_name("project", context)
         if scope == "task" and any(hint in raw_query for hint in TASK_CONTEXT_HINTS):
-            return context.get("task", {}).get("name")
+            return context.get("task", {}).get("name") or _recent_context_name("task", context)
 
     return raw_name
 
@@ -696,6 +804,35 @@ def _normalize_context(conversation_context: dict[str, Any] | None) -> dict[str,
     if not conversation_context.get("_isolated"):
         return {}
     return conversation_context
+
+
+def _recent_context_item(scope: str, context: dict[str, Any]) -> dict[str, Any] | None:
+    scoped_item = context.get(scope) or {}
+    if isinstance(scoped_item, dict) and scoped_item.get("name"):
+        return scoped_item
+    for item in context.get("recent_entities") or []:
+        if item.get("scope") == scope and item.get("name"):
+            return {
+                "id": item.get("id"),
+                "name": item.get("name"),
+            }
+    return None
+
+
+def _recent_context_name(scope: str, context: dict[str, Any]) -> str | None:
+    item = _recent_context_item(scope, context)
+    return item.get("name") if item else None
+
+
+def _recent_context_bonus(scope: str, candidate_id: Any, context: dict[str, Any]) -> float:
+    if candidate_id is None:
+        return 0.0
+    for index, item in enumerate((context.get("recent_entities") or [])[:4]):
+        if item.get("scope") != scope:
+            continue
+        if item.get("id") == candidate_id:
+            return max(0.02, 0.07 - (index * 0.015))
+    return 0.0
 
 
 def _load_conversation_context() -> dict[str, Any]:

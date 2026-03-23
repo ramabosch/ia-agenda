@@ -12,6 +12,7 @@ from app.config import (
 )
 
 ALLOWED_INTENTS = {
+    "get_daily_pulse",
     "get_active_projects",
     "get_active_clients",
     "get_open_tasks_by_client_name",
@@ -67,6 +68,7 @@ ALLOWED_INTENTS = {
     "get_today_changes",
     "get_last_interaction",
     "create_client",
+    "expand_context",
     "telegram_channel_command",
     "unknown",
 }
@@ -90,6 +92,7 @@ EMPTY_PAYLOAD = {
     "secondary_descriptor": None,
     "contrast_hint": None,
     "use_previous_candidates": None,
+    "expand_mode": None,
     "recommendation_focus": None,
     "followup_focus": None,
     "filter_mode": None,
@@ -546,10 +549,29 @@ JSON:
   "entity_hint": "dashboard",
   "recommendation_focus": null
 }
+
+Usuario: que hay para hoy
+JSON:
+{
+  "intent": "get_daily_pulse",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null,
+  "entity_hint": null,
+  "recommendation_focus": null
+}
 """.strip()
 
 SYSTEM_PROMPT = f"""
-Sos un parser estricto de lenguaje natural para una agenda operativa.
+Sos un asistente de agenda conversacional.
 Tu trabajo es convertir la consulta del usuario en una LISTA JSON valida de acciones.
 
 Reglas:
@@ -567,10 +589,19 @@ Reglas:
 12. Para notas operativas, usa intent = "add_task_note" y completa last_note.
 13. Si hay multiples pedidos en el mismo texto, devolve multiples acciones ordenadas secuencialmente.
 14. Usa intent = "create_client" si el usuario pide crear un cliente.
-15. Usa intent = "telegram_channel_command" y command en ["/start","/help","/reset","/status","/whoami"] si detectas un comando de canal.
+15. Usa intent = "telegram_channel_command" y command en ["/start","/help","/reset","/status","/whoami","/debug"] si detectas un comando de canal.
+16. Diferencia estricta:
+    - create_task = cosas para hacer SIN horario fijo.
+    - create_agenda_item = reuniones, citas, eventos, llamados agendados o cualquier accion con dia/hora.
+17. Si aparecen palabras como "agendar", "agendame", "agenda", "reunion", "reunión", "cita", "evento", SIEMPRE prioriza create_agenda_item.
+18. Si el texto incluye dia y hora, nunca uses create_task para ese fragmento: usa create_agenda_item.
+19. Si el usuario usa referencias vagas como "eso", "el otro", "la otra", "lo de recien" o "lo anterior", usa intent = "expand_context".
+20. Si no hay un proyecto claro, deja project_name = null en vez de adivinar.
+21. Frases como "que hay para hoy", "como viene el dia", "resumen de hoy" o "que tenemos" deben mapear a intent = "get_daily_pulse".
 
 Intentos permitidos:
 - get_active_projects
+- get_daily_pulse
 - get_active_clients
 - get_open_tasks_by_client_name
 - get_client_summary
@@ -616,6 +647,7 @@ Intentos permitidos:
 - get_today_changes
 - get_last_interaction
 - create_client
+- expand_context
 - telegram_channel_command
 - unknown
 
@@ -750,6 +782,7 @@ def _validate_payload_shape(payload: dict[str, Any]) -> dict[str, Any] | None:
     clean["next_action"] = _normalize_nullable_string(clean.get("next_action"))
     clean["last_note"] = _normalize_nullable_string(clean.get("last_note"))
     clean["entity_hint"] = _normalize_nullable_string(clean.get("entity_hint"))
+    clean["expand_mode"] = _normalize_nullable_string(clean.get("expand_mode"))
     clean["recommendation_focus"] = _normalize_nullable_string(clean.get("recommendation_focus"))
     clean["followup_focus"] = _normalize_nullable_string(clean.get("followup_focus"))
     clean["filter_mode"] = _normalize_nullable_string(clean.get("filter_mode"))
@@ -764,7 +797,7 @@ def _validate_payload_shape(payload: dict[str, Any]) -> dict[str, Any] | None:
     if clean["intent"] not in ALLOWED_INTENTS:
         return None
     if clean["intent"] == "telegram_channel_command":
-        if clean.get("command") not in {"/start", "/help", "/reset", "/status", "/whoami"}:
+        if clean.get("command") not in {"/start", "/help", "/reset", "/status", "/whoami", "/debug"}:
             return None
 
     return clean
@@ -783,6 +816,45 @@ def _mentions_open_only(query: str) -> bool:
 def _coerce_semantics(payload: dict[str, Any], user_query: str) -> dict[str, Any]:
     q = f" {user_query.strip().lower()} "
     intent = payload["intent"]
+    agenda_markers = (
+        " agendar ",
+        " agendame ",
+        " agenda ",
+        " reunion ",
+        " reunión ",
+        " cita ",
+        " evento ",
+    )
+    has_agenda_signal = any(marker in q for marker in agenda_markers)
+    has_time_signal = any(
+        marker in q
+        for marker in (
+            " a las ",
+            " hs",
+            " hoy",
+            " manana",
+            " mañana",
+            " lunes",
+            " martes",
+            " miercoles",
+            " miércoles",
+            " jueves",
+            " viernes",
+            " sabado",
+            " sábado",
+            " domingo",
+        )
+    )
+
+    if intent in {"create_task", "create_followup"} and (has_agenda_signal or has_time_signal):
+        payload["intent"] = "create_agenda_item"
+        if not payload.get("agenda_title"):
+            payload["agenda_title"] = payload.get("content") or payload.get("task_name")
+        if not payload.get("agenda_kind"):
+            payload["agenda_kind"] = "event"
+        if not payload.get("agenda_date_hint") and payload.get("due_hint"):
+            payload["agenda_date_hint"] = payload.get("due_hint")
+
 
     client_name = payload.get("client_name")
     project_name = payload.get("project_name")
@@ -834,7 +906,7 @@ def _coerce_semantics(payload: dict[str, Any], user_query: str) -> dict[str, Any
             payload["intent"] = "unknown"
 
     if intent == "telegram_channel_command":
-        if payload.get("command") not in {"/start", "/help", "/reset", "/status", "/whoami"}:
+        if payload.get("command") not in {"/start", "/help", "/reset", "/status", "/whoami", "/debug"}:
             payload["intent"] = "unknown"
 
     if intent == "compound_query":
@@ -985,7 +1057,12 @@ def parse_actions_with_llm(user_query: str) -> list[dict[str, Any]]:
             return []
 
         parsed = json.loads(cleaned)
-        candidates = parsed if isinstance(parsed, list) else [parsed]
+        if isinstance(parsed, list):
+            candidates = parsed
+        elif isinstance(parsed, dict):
+            candidates = [parsed]
+        else:
+            candidates = []
         actions: list[dict[str, Any]] = []
         for candidate in candidates:
             validated = _validate_payload_shape(candidate)

@@ -32,6 +32,18 @@ Después de cambios en Python:
 Si el cambio toca parser, resolver o response service:
 - además indicar pruebas manuales concretas para la UI del asistente.
 
+## Validación obligatoria
+Antes de cambios funcionales:
+- correr `powershell -ExecutionPolicy Bypass -File scripts/validate.ps1`
+
+Después de cambios en Python:
+- correr `powershell -ExecutionPolicy Bypass -File scripts/validate.ps1`
+
+Si la validación falla:
+- no cerrar la tarea como terminada
+- explicar la causa
+- incluir traceback o error real en la salida
+
 ## Formato de salida esperado
 Al terminar cualquier tarea, devolver:
 
@@ -82,3 +94,20 @@ Setup:
 
 Validación:
 - `powershell -ExecutionPolicy Bypass -File scripts/validate.ps1`
+
+
+@'
+# AGENTS.md
+
+See:
+- .cursor/rules/10-agenda-ai.mdc
+- .clinerules/01-agenda-ai.md
+
+Priority rules:
+- Reuse the shared runtime and core services.
+- Never invent context.
+- Never create/update under ambiguity.
+- Keep Telegram context isolated by chat_id.
+- Run validate before closing tasks.
+- Run smoke acceptance for conversational changes.
+'@ | Set-Content AGENTS.md

@@ -1,0 +1,14 @@
+@'
+.venv/
+__pycache__/
+*.pyc
+artifacts/
+data/*.db
+data/*.sqlite*
+node_modules/
+dist/
+build/
+.git/
+.vscode/
+actions-runner/
+'@ | Set-Content .cursorignore

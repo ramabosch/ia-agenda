@@ -940,6 +940,32 @@ DEFAULT_SCENARIOS = [
         ],
     ),
     Scenario(
+        scenario_id="CTX-001",
+        title="Continuidad vaga mantiene la entidad activa",
+        category="continuity",
+        severity="medium",
+        tags=["daily", "continuity", "context"],
+        turns=[
+            ScenarioTurn(
+                "que onda cam",
+                {
+                    "should_not_error": True,
+                    "should_have_response": True,
+                    "should_have_scope": "client",
+                },
+            ),
+            ScenarioTurn(
+                "y de eso que hay?",
+                {
+                    "should_not_error": True,
+                    "should_have_response": True,
+                    "should_have_context_reuse": True,
+                    "should_contain_any": ["Cam", "Pendientes importantes"],
+                },
+            ),
+        ],
+    ),
+    Scenario(
         scenario_id="TMP-001",
         title="Temporalidad diaria real",
         category="temporal",

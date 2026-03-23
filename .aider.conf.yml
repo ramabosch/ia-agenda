@@ -1,0 +1,9 @@
+@'
+model: gpt-4o
+auto-commits: true
+dirty-commits: true
+git: true
+auto-test: true
+test-cmd: powershell -ExecutionPolicy Bypass -File scripts/validate.ps1
+lint-cmd: python -m compileall app
+'@ | Set-Content .aider.conf.yml

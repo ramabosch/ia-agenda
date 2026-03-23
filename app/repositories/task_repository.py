@@ -217,6 +217,15 @@ def get_task_by_name(db: Session, name: str):
     )
 
 
+def delete_task(db: Session, task_id: int) -> Task | None:
+    task = get_task_by_id(db, task_id)
+    if not task:
+        return None
+    db.delete(task)
+    db.commit()
+    return task
+
+
 def search_tasks_by_name(db: Session, name: str, limit: int = 5):
     search = f"%{name.strip()}%"
     return (
@@ -240,4 +249,26 @@ def search_tasks_by_name_and_client_id(db: Session, name: str, client_id: int, l
         .order_by(Task.created_at.desc())
         .limit(limit)
         .all()
+    )
+
+
+def find_recent_open_duplicate_task(
+    db: Session,
+    *,
+    project_id: int,
+    title: str,
+    created_after: datetime,
+) -> Task | None:
+    normalized_title = (title or "").strip()
+    if not normalized_title:
+        return None
+    return (
+        db.query(Task)
+        .options(joinedload(Task.project).joinedload(Project.client))
+        .filter(Task.project_id == project_id)
+        .filter(Task.title.ilike(normalized_title))
+        .filter(Task.status != "hecha")
+        .filter(Task.created_at >= created_after)
+        .order_by(Task.created_at.desc())
+        .first()
     )

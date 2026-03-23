@@ -1,0 +1,105 @@
+---
+description: Reglas de proyecto para Agenda AI (Python + Streamlit + SQLAlchemy + SQLite + Telegram)
+alwaysApply: true
+---
+
+# Agenda AI - Project Rules
+
+## Stack real del proyecto
+- Python en Windows
+- Streamlit para UI/debug local
+- SQLAlchemy + SQLite para persistencia
+- Telegram polling como canal externo
+- PowerShell como shell por defecto
+- Tests con unittest/runner propio
+- Acceptance runner propio en `tests/acceptance_runner.py`
+- Validación estándar del repo con `scripts/validate.ps1`
+
+## Objetivo del sistema
+Construir un asistente IA de agenda y organización diaria que:
+- maneja clientes, proyectos, tareas y follow-ups
+- soporta Telegram como canal
+- soporta agenda personal (`AgendaItem`)
+- prioriza seguridad, claridad y trazabilidad
+- nunca inventa contexto cuando no existe contexto seguro
+
+## Reglas de arquitectura
+- NO crear una arquitectura paralela si puede reutilizarse el core existente.
+- Reutilizar siempre:
+  - `app/services/conversation_runtime_service.py`
+  - `app/services/query_response_service.py`
+  - `app/services/hybrid_parser_service.py`
+  - `app/services/reference_resolver.py`
+- Web y Telegram deben usar el mismo flujo compartido.
+- El contexto conversacional de Telegram debe estar aislado por `chat_id`.
+- No usar `st.session_state` fuera de Streamlit.
+- No mezclar agenda personal con tareas operativas salvo que esté claramente definido.
+
+## Reglas de persistencia
+- No inventar tablas o campos si no son necesarios.
+- Si se agrega modelo nuevo, debe ser mínimo, explícito y testeable.
+- Evitar depender de lazy-loading inseguro en entidades ORM.
+- Preferir eager loading o serialización segura al construir respuestas.
+
+## Convenciones de nombres y config
+Usar estos nombres exactos para variables/config:
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_ALLOWED_CHAT_IDS`
+- `OPENAI_API_KEY`
+- `OPENAI_API_BASE`
+- `AIDER_MODEL`
+- `AIDER_TEST_CMD`
+- `AIDER_LINT_CMD`
+
+## Estilo de implementación
+- Cambios mínimos, auditables y mantenibles.
+- Priorizar seguridad sobre “magia”.
+- Si hay ambigüedad:
+  - NO crear
+  - NO actualizar
+  - pedir clarificación específica
+- Si no hay contexto suficiente:
+  - no inventar
+  - degradar de forma clara y útil
+
+## Estilo de código
+- Python claro y explícito.
+- Funciones chicas y con nombres concretos.
+- Evitar duplicación entre parser, resolver y dispatcher.
+- Mantener separación clara entre:
+  - canal
+  - interpretación
+  - core
+  - persistencia
+- No meter heurísticas opacas si una regla simple alcanza.
+
+## Testing y validación
+Antes de cerrar cualquier cambio:
+- correr `powershell -ExecutionPolicy Bypass -File scripts/validate.ps1`
+- si el cambio toca conversación real, correr también:
+  - `.\.venv\Scripts\python.exe scripts\run_acceptance_suite.py --smoke-critical`
+- si el cambio toca Telegram, validar:
+  - aislamiento por `chat_id`
+  - whitelist
+  - comandos de canal
+- si el cambio toca parsing o targeting, agregar tests.
+- si el cambio toca UX, agregar tests mínimos de wording si aplica.
+
+## Git y commits
+- No hardcodear secretos.
+- No commitear tokens, `.env`, DBs sensibles o archivos locales temporales.
+- Commits con intención clara y chicos.
+
+## Prioridades del producto
+Este proyecto prioriza:
+1. confiabilidad
+2. seguridad en acciones
+3. claridad de respuesta
+4. utilidad conversacional real
+5. velocidad de iteración
+
+## Qué evitar
+- No responder con nombres técnicos internos al usuario final si se puede traducir.
+- No convertir todo en LLM-first si el core ya resuelve seguro.
+- No sobreingenierizar.
+- No romper el acceptance runner ni la smoke critical suite.
