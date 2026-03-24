@@ -411,6 +411,24 @@ class CreationBehaviorTests(unittest.TestCase):
         self.assertIn("inbox", response.lower())
         self.assertIn("vacio", response.lower())
 
+    def test_inbox_natural_phrasing_uses_safe_fallback(self):
+        phrases = [
+            "¿Que tareas tengo en el Inbox?",
+            "Que hay en el inbox?",
+            "decime las tareas del inbox",
+        ]
+
+        with patch(
+            "app.services.query_response_service.get_inbox_tasks",
+            return_value=[],
+        ):
+            for phrase in phrases:
+                parsed = parse_user_query(phrase)
+                response = build_response_from_query(parsed, user_query=phrase, conversation_context={})
+                self.assertEqual(parsed["intent"], "get_tasks_by_project_name")
+                self.assertEqual(parsed["project_name"], "Inbox")
+                self.assertIn("inbox", response.lower())
+
     def test_duplicate_recent_task_does_not_create_third_copy(self):
         parsed = {"intent": "create_task", "project_name": "Inbox", "task_name": "comprar cafe"}
         duplicate_result = {

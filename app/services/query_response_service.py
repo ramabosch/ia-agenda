@@ -241,7 +241,11 @@ def build_response_from_query(
         )
         if continued_response:
             return continued_response
-        return _handle_clarification_intent(parsed_query, resolved_references)
+        return _handle_clarification_intent(
+            parsed_query,
+            resolved_references,
+            conversation_context=conversation_context,
+        )
 
     if intent == "get_operational_summary":
         return _handle_operational_summary_intent(
@@ -382,6 +386,11 @@ def build_response_from_query(
             **_base_conversation_context(parsed_query, "none"),
             "task_status_filter": status_filter,
         }
+        _store_candidate_entities(
+            parsed_query["_conversation_context"],
+            _build_task_candidate_entities(tasks),
+            source="task_status_list",
+        )
         lines = [f"Encontre {len(tasks)} tareas en estado '{status_filter}':"]
         for task in tasks[:10]:
             project_name = task.project.name if task.project else "Sin proyecto"
@@ -512,6 +521,11 @@ def build_response_from_query(
                 **_base_conversation_context(parsed_query, "project"),
                 "project": {"id": None, "name": "Inbox"},
             }
+            _store_candidate_entities(
+                parsed_query["_conversation_context"],
+                _build_task_candidate_entities(tasks),
+                source="inbox_task_list",
+            )
             if not tasks:
                 return "Tu Inbox esta vacio por ahora."
             lines = ["Esto es lo que tenes en tu Inbox:"]
@@ -1055,6 +1069,11 @@ def _build_agenda_context(parsed_query: dict, *, query_scope: str, target_date: 
         context["agenda_context"]["agenda_item_id"] = getattr(item, "id", None)
         context["agenda_context"]["title"] = getattr(item, "title", None)
         context["agenda_context"]["kind"] = getattr(item, "kind", None)
+    _store_candidate_entities(
+        context,
+        _build_agenda_candidate_entities(items),
+        source=f"agenda_{query_scope}",
+    )
     return context
 
 
@@ -1875,7 +1894,47 @@ def _continue_pending_action_if_applicable(
     *,
     conversation_context: dict | None,
 ) -> str | None:
-    pending_action = ((conversation_context or {}).get("pending_action") or {})
+    context = conversation_context or {}
+    ordinal_action = parsed_query.get("ordinal_action")
+    ordinal_candidate = _resolve_contextual_candidate(context, parsed_query.get("ordinal_index"))
+    pending_action = (context.get("pending_action") or {})
+
+    if ordinal_action:
+        if ordinal_action == "show" and ordinal_candidate and ordinal_candidate.get("scope") == "agenda":
+            return _show_agenda_candidate(parsed_query, ordinal_candidate)
+
+        if ordinal_action == "delete":
+            if ordinal_candidate and ordinal_candidate.get("scope") == "agenda":
+                result = delete_agenda_item_conversational(int(ordinal_candidate["id"]))
+                return _finalize_ordinal_agenda_delete_response(parsed_query, ordinal_candidate, result)
+            if resolved_references.get("scope") == "task" and resolved_references.get("task", {}).get("resolved"):
+                result = delete_task_conversational(int(resolved_references["task"]["resolved"]["id"]))
+                return _finalize_ordinal_task_delete_response(parsed_query, resolved_references, result)
+            if ordinal_candidate:
+                return _abort_with_context(parsed_query, "Necesito una tarea o evento claro para borrar con esa referencia ordinal.")
+
+        if ordinal_action == "close":
+            if ordinal_candidate and ordinal_candidate.get("scope") not in {None, "task"}:
+                return _abort_with_context(parsed_query, "Necesito una tarea clara para cerrarla con esa referencia ordinal.")
+            if resolved_references.get("scope") == "task" and resolved_references.get("task", {}).get("resolved"):
+                synthetic_query = {
+                    "intent": "update_task_status",
+                    "new_status": "hecha",
+                    "_last_user_query": parsed_query.get("_last_user_query"),
+                    "_identity_profile": parsed_query.get("_identity_profile"),
+                }
+                response = _handle_task_update_intent(synthetic_query, resolved_references)
+                for key in (
+                    "_conversation_context",
+                    "_audit_trace",
+                    "_update_type",
+                    "_update_real",
+                    "_update_result",
+                ):
+                    if key in synthetic_query:
+                        parsed_query[key] = synthetic_query[key]
+                return response
+
     if not pending_action:
         return None
     if resolved_references.get("scope") != "task" or not resolved_references.get("task", {}).get("resolved"):
@@ -1901,7 +1960,12 @@ def _continue_pending_action_if_applicable(
     return response
 
 
-def _handle_clarification_intent(parsed_query: dict, resolved_references: dict) -> str:
+def _handle_clarification_intent(
+    parsed_query: dict,
+    resolved_references: dict,
+    *,
+    conversation_context: dict | None,
+) -> str:
     if resolved_references.get("security_blocked"):
         return _abort_with_context(
             parsed_query,
@@ -1910,6 +1974,10 @@ def _handle_clarification_intent(parsed_query: dict, resolved_references: dict) 
 
     if resolved_references.get("clarification_needed"):
         return _abort_with_context(parsed_query, _build_clarification_response(resolved_references))
+
+    ordinal_candidate = _resolve_contextual_candidate(conversation_context or {}, parsed_query.get("ordinal_index"))
+    if ordinal_candidate and ordinal_candidate.get("scope") == "agenda":
+        return _show_agenda_candidate(parsed_query, ordinal_candidate)
 
     scope = resolved_references.get("scope")
     if scope == "task" and resolved_references.get("task", {}).get("resolved"):
@@ -3155,7 +3223,10 @@ def _resolve_if_needed(parsed_query: dict, user_query: str | None, conversation_
     parsed_query["_candidate_types"] = resolved.get("candidate_types", [])
     parsed_query["_expected_scope"] = parsed_query.get("expected_scope")
     parsed_query["_secondary_descriptor"] = parsed_query.get("secondary_descriptor")
-    parsed_query["_used_previous_candidates"] = bool(parsed_query.get("use_previous_candidates")) and bool((conversation_context or {}).get("clarification_candidates"))
+    previous_candidates_available = bool((conversation_context or {}).get("clarification_candidates")) or bool(
+        (conversation_context or {}).get("candidate_entities")
+    )
+    parsed_query["_used_previous_candidates"] = bool(parsed_query.get("use_previous_candidates")) and previous_candidates_available
     parsed_query["_used_context_to_disambiguate"] = resolved.get("used_context_to_disambiguate", False)
     parsed_query["_recent_context_used"] = resolved.get("context", {})
     parsed_query["_context_source"] = resolved.get("context_source", "none")
@@ -4373,7 +4444,7 @@ def _build_new_session_greeting_line(conversation_context: dict | None, profile:
         scheduled_time = getattr(first_item, "scheduled_time", None)
         time_label = scheduled_time.strftime("%H:%M") if scheduled_time else "sin hora"
         prefix = f"Hola de nuevo, {name}." if name else "Hola de nuevo."
-        return f"{prefix} Acordate que hoy tenes {getattr(first_item, 'title', 'un compromiso')} de las {time_label}. En que te ayudo ahora?"
+        return f"{prefix} Veo en agenda {getattr(first_item, 'title', 'un compromiso')} a las {time_label}. En que te ayudo ahora?"
 
     if name:
         return f"Hola de nuevo, {name}. Hoy no veo eventos en agenda. En que te ayudo ahora?"
@@ -4729,7 +4800,196 @@ def _remember_context(
         project_summary = project_summaries[0]
         context["project"] = {"id": project_summary["project_id"], "name": project_summary["project_name"]}
 
+    candidate_entities = []
+    candidate_source = None
+    if tasks:
+        candidate_entities = _build_task_candidate_entities(tasks)
+        candidate_source = "task_list"
+    elif projects:
+        candidate_entities = _build_project_candidate_entities(projects)
+        candidate_source = "project_list"
+    elif project_summaries:
+        candidate_entities = _build_project_summary_candidate_entities(project_summaries)
+        candidate_source = "project_summary_list"
+    _store_candidate_entities(context, candidate_entities, source=candidate_source)
+
     parsed_query["_conversation_context"] = context
+
+
+def _store_candidate_entities(context: dict, candidate_entities: list[dict], *, source: str | None) -> None:
+    if not isinstance(context, dict):
+        return
+    if not candidate_entities:
+        context.pop("candidate_entities", None)
+        context.pop("candidate_entity_type", None)
+        context.pop("candidate_source", None)
+        context.pop("shown_order", None)
+        return
+
+    normalized_entities: list[dict] = []
+    for index, item in enumerate(candidate_entities, start=1):
+        normalized_item = dict(item)
+        normalized_item["shown_order"] = index
+        normalized_entities.append(normalized_item)
+
+    context["candidate_entities"] = normalized_entities
+    context["candidate_entity_type"] = normalized_entities[0].get("scope")
+    context["candidate_source"] = source
+    context["shown_order"] = [item.get("id") for item in normalized_entities]
+
+
+def _build_task_candidate_entities(tasks: list | None) -> list[dict]:
+    candidates: list[dict] = []
+    for task in (tasks or [])[:10]:
+        project = getattr(task, "project", None)
+        client = getattr(project, "client", None) if project else None
+        candidates.append(
+            {
+                "scope": "task",
+                "id": getattr(task, "id", None),
+                "name": getattr(task, "title", None),
+                "confidence": 0.99,
+                "project_name": getattr(project, "name", None),
+                "client_name": getattr(client, "name", None),
+            }
+        )
+    return candidates
+
+
+def _build_project_candidate_entities(projects: list | None) -> list[dict]:
+    candidates: list[dict] = []
+    for project in (projects or [])[:10]:
+        client = getattr(project, "client", None)
+        candidates.append(
+            {
+                "scope": "project",
+                "id": getattr(project, "id", None),
+                "name": getattr(project, "name", None),
+                "confidence": 0.99,
+                "client_name": getattr(client, "name", None),
+            }
+        )
+    return candidates
+
+
+def _build_project_summary_candidate_entities(project_summaries: list[dict] | None) -> list[dict]:
+    candidates: list[dict] = []
+    for project in (project_summaries or [])[:10]:
+        candidates.append(
+            {
+                "scope": "project",
+                "id": project.get("project_id"),
+                "name": project.get("project_name"),
+                "confidence": 0.99,
+                "client_name": project.get("client_name"),
+            }
+        )
+    return candidates
+
+
+def _build_agenda_candidate_entities(items: list | None) -> list[dict]:
+    candidates: list[dict] = []
+    for item in (items or [])[:10]:
+        scheduled_time = getattr(item, "scheduled_time", None)
+        candidates.append(
+            {
+                "scope": "agenda",
+                "id": getattr(item, "id", None),
+                "name": getattr(item, "title", None),
+                "confidence": 0.99,
+                "kind": getattr(item, "kind", None),
+                "scheduled_date": getattr(item, "scheduled_date", None).isoformat() if getattr(item, "scheduled_date", None) else None,
+                "scheduled_time": scheduled_time.strftime("%H:%M") if scheduled_time else None,
+            }
+        )
+    return candidates
+
+
+def _resolve_contextual_candidate(context: dict, ordinal_index: int | None) -> dict | None:
+    if ordinal_index is None or ordinal_index < 0:
+        return None
+    if not isinstance(context, dict):
+        return None
+
+    candidate_entities = list(context.get("candidate_entities") or [])
+    clarification_candidates = list(context.get("clarification_candidates") or [])
+    if ordinal_index < len(candidate_entities):
+        return candidate_entities[ordinal_index]
+    if ordinal_index < len(clarification_candidates):
+        return clarification_candidates[ordinal_index]
+    return None
+
+
+def _show_agenda_candidate(parsed_query: dict, candidate: dict) -> str:
+    scheduled_date = candidate.get("scheduled_date") or "sin fecha"
+    scheduled_time = candidate.get("scheduled_time") or "Sin hora"
+    kind = "Recordatorio" if candidate.get("kind") == "reminder" else "Evento"
+    response = f"{kind}: {candidate.get('name') or 'Sin titulo'} | Fecha: {scheduled_date} | Hora: {scheduled_time}."
+    parsed_query["_conversation_context"] = {
+        **_base_conversation_context(parsed_query, "agenda"),
+        "agenda_context": {
+            "agenda_item_id": candidate.get("id"),
+            "title": candidate.get("name"),
+            "kind": candidate.get("kind"),
+            "anchor_date": candidate.get("scheduled_date"),
+            "anchor_time": candidate.get("scheduled_time"),
+        },
+    }
+    _store_candidate_entities(parsed_query["_conversation_context"], [candidate], source="agenda_selection")
+    _set_audit_trace(
+        parsed_query,
+        user_query=parsed_query.get("_last_user_query"),
+        response=response,
+        action_status="informational",
+        action_type="agenda_query",
+    )
+    return response
+
+
+def _finalize_ordinal_agenda_delete_response(parsed_query: dict, candidate: dict, result: dict) -> str:
+    parsed_query["_update_type"] = "agenda_delete"
+    parsed_query["_update_real"] = bool(result.get("deleted"))
+    parsed_query["_update_result"] = result
+    if not result.get("deleted"):
+        return _abort_with_context(parsed_query, "No pude borrar ese item de agenda con suficiente claridad.")
+
+    response = f"Listo: borre '{candidate.get('name') or 'ese item'}' de la agenda."
+    parsed_query["_conversation_context"] = {
+        **_base_conversation_context(parsed_query, "agenda"),
+        "agenda_context": {
+            "anchor_date": candidate.get("scheduled_date"),
+            "anchor_time": candidate.get("scheduled_time"),
+        },
+    }
+    _set_audit_trace(
+        parsed_query,
+        user_query=parsed_query.get("_last_user_query"),
+        response=response,
+        action_status="executed",
+        action_type="agenda_delete",
+        affected_entity={"scope": "agenda", "id": candidate.get("id"), "name": candidate.get("name")},
+    )
+    return response
+
+
+def _finalize_ordinal_task_delete_response(parsed_query: dict, resolved_references: dict, result: dict) -> str:
+    parsed_query["_update_type"] = "task_delete"
+    parsed_query["_update_real"] = bool(result.get("deleted"))
+    parsed_query["_update_result"] = result
+    if not result.get("deleted"):
+        return _abort_with_context(parsed_query, "No pude borrar esa tarea con suficiente claridad.")
+
+    _remember_context(parsed_query, resolved_references, focus_scope="task")
+    response = f"Listo: borre la tarea '{result.get('task_title', 'sin titulo')}'."
+    _set_audit_trace(
+        parsed_query,
+        user_query=parsed_query.get("_last_user_query"),
+        response=response,
+        action_status="executed",
+        action_type="delete_task",
+        affected_entity={"scope": "task", "id": result.get("task_id"), "name": result.get("task_title")},
+    )
+    return response
 
 
 def _remember_context_from_summary(parsed_query: dict, summary: dict, focus_scope: str) -> None:

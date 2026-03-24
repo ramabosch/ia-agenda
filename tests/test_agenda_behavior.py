@@ -2,12 +2,43 @@ import unittest
 from datetime import date, datetime, time
 from unittest.mock import patch
 
+from app.services.conversation_runtime_service import process_conversation_turn
 from app.services.query_response_service import build_response_from_query
 from app.services.query_parser_service import parse_user_query
 from tests.helpers import make_agenda_item
 
 
 class AgendaBehaviorTests(unittest.TestCase):
+    def test_runtime_prefers_rules_when_llm_drops_agenda_title(self):
+        llm_result = {
+            "intent": "create_agenda_item",
+            "agenda_kind": "event",
+            "agenda_date_hint": "manana",
+            "agenda_time_hint": "10:00",
+            "agenda_title": None,
+            "_parser_source": "llm",
+        }
+
+        with patch("app.services.hybrid_parser_service.parse_query_with_llm", return_value=llm_result), patch(
+            "app.services.query_response_service.create_agenda_item_conversational",
+            return_value={
+                "created": True,
+                "agenda_item_id": 99,
+                "title": "reunion con cam",
+                "scheduled_date": date.today().fromordinal(date.today().toordinal() + 1),
+                "scheduled_time": time(10, 0),
+                "kind": "event",
+                "note": None,
+            },
+        ) as create_mock:
+            result = process_conversation_turn("Agenda una reunion con CAM para manana a las 10:00", conversation_context={})
+
+        self.assertEqual(result["parsed_query"]["_parser_source"], "rules")
+        self.assertEqual(result["parsed_query"]["agenda_title"], "reunion con cam")
+        self.assertIn("guarde el evento", result["response_text"].lower())
+        self.assertNotIn("contenido", result["response_text"].lower())
+        self.assertEqual(create_mock.call_args.args[0], "reunion con cam")
+
     def test_create_event_for_tomorrow_at_ten(self):
         parsed = parse_user_query("agendame manana a las 10 una reunion con Cam")
 
@@ -277,6 +308,72 @@ class AgendaBehaviorTests(unittest.TestCase):
         self.assertIn("despues de las 10:00", response.lower())
         self.assertIn("dentista", response.lower())
         self.assertNotIn("reunion con cam", response.lower())
+
+    def test_agenda_list_then_show_first_uses_recent_candidates(self):
+        listed_items = [
+            make_agenda_item(21, "reunion con cam", date(2026, 3, 20), scheduled_time=time(10, 0)),
+            make_agenda_item(22, "dentista", date(2026, 3, 20), scheduled_time=time(18, 0)),
+        ]
+        first_turn = parse_user_query("que tengo para hoy")
+
+        with patch(
+            "app.services.query_response_service.resolve_agenda_date_hint",
+            return_value={
+                "resolved": True,
+                "scope": "today",
+                "target_date": date(2026, 3, 20),
+                "start_date": date(2026, 3, 20),
+                "end_date": date(2026, 3, 20),
+                "label": "hoy",
+                "error": None,
+            },
+        ), patch("app.services.query_response_service.get_agenda_items_for_date", return_value=listed_items):
+            build_response_from_query(first_turn, user_query="que tengo para hoy")
+
+        second_turn = parse_user_query("mostrame la primera")
+        response = build_response_from_query(
+            second_turn,
+            user_query="mostrame la primera",
+            conversation_context=first_turn["_conversation_context"],
+        )
+
+        self.assertIn("reunion con cam", response.lower())
+        self.assertEqual(second_turn["_conversation_context"]["agenda_context"]["agenda_item_id"], 21)
+
+    def test_agenda_list_then_delete_first_uses_recent_candidates(self):
+        listed_items = [
+            make_agenda_item(31, "reunion con cam", date(2026, 3, 20), scheduled_time=time(10, 0)),
+            make_agenda_item(32, "dentista", date(2026, 3, 20), scheduled_time=time(18, 0)),
+        ]
+        first_turn = parse_user_query("que tengo para hoy")
+
+        with patch(
+            "app.services.query_response_service.resolve_agenda_date_hint",
+            return_value={
+                "resolved": True,
+                "scope": "today",
+                "target_date": date(2026, 3, 20),
+                "start_date": date(2026, 3, 20),
+                "end_date": date(2026, 3, 20),
+                "label": "hoy",
+                "error": None,
+            },
+        ), patch("app.services.query_response_service.get_agenda_items_for_date", return_value=listed_items):
+            build_response_from_query(first_turn, user_query="que tengo para hoy")
+
+        second_turn = parse_user_query("borra la primera")
+        with patch(
+            "app.services.query_response_service.delete_agenda_item_conversational",
+            return_value={"deleted": True, "agenda_item_id": 31, "title": "reunion con cam"},
+        ) as delete_mock:
+            response = build_response_from_query(
+                second_turn,
+                user_query="borra la primera",
+                conversation_context=first_turn["_conversation_context"],
+            )
+
+        delete_mock.assert_called_once_with(31)
+        self.assertIn("borre 'reunion con cam'", response.lower())
 
     def test_missing_date_or_invalid_time_does_not_invent(self):
         parsed_missing_date = parse_user_query("agendame revisar indicadores")

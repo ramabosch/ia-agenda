@@ -179,10 +179,100 @@ class ContextFlowTests(unittest.TestCase):
                 "task": first_task,
             },
         ):
-            result = process_conversation_turn("la primera", conversation_context=context)
+            result = process_conversation_turn("Cerra la primera.", conversation_context=context)
 
         self.assertIn("comprar cafe", result["response_text"].lower())
         self.assertIn("actualice la tarea", result["response_text"].lower())
+
+    def test_task_list_then_close_first_uses_recent_candidate_entities(self):
+        agenda_ai = make_client(9, "Agenda AI")
+        inbox = make_project(30, "Inbox", agenda_ai)
+        first_task = make_task(301, "Comprar cafe", inbox)
+        second_task = make_task(302, "Revisar stock", inbox)
+
+        with patch("app.services.reference_resolver.get_all_clients", return_value=[agenda_ai]), patch(
+            "app.services.query_response_service.get_open_tasks_by_client_id",
+            return_value=[first_task, second_task],
+        ), patch(
+            "app.services.query_response_service.get_tasks_by_client_id",
+            return_value=[first_task, second_task],
+        ), patch(
+            "app.services.reference_resolver.get_all_tasks",
+            return_value=[first_task, second_task],
+        ), patch(
+            "app.services.query_response_service.update_task_status_conversational",
+            return_value={
+                "updated": True,
+                "task_id": first_task.id,
+                "task_title": first_task.title,
+                "field": "status",
+                "old_value": "pendiente",
+                "new_value": "hecha",
+                "task": first_task,
+            },
+        ):
+            first = process_conversation_turn("decime las tareas de agenda ai", conversation_context={})
+            second = process_conversation_turn(
+                "Cerra la primera.",
+                conversation_context=first["conversation_context"],
+            )
+
+        self.assertEqual(len(first["conversation_context"].get("candidate_entities") or []), 2)
+        self.assertIn("comprar cafe", second["response_text"].lower())
+        self.assertEqual(second["conversation_context"].get("task", {}).get("name"), "Comprar cafe")
+
+    def test_task_list_then_first_resolves_entity_without_literal_name(self):
+        agenda_ai = make_client(9, "Agenda AI")
+        inbox = make_project(30, "Inbox", agenda_ai)
+        first_task = make_task(301, "Comprar cafe", inbox)
+        second_task = make_task(302, "Revisar stock", inbox)
+
+        task_summary = {
+            "task_id": first_task.id,
+            "title": first_task.title,
+            "description": None,
+            "status": "pendiente",
+            "priority": "media",
+            "due_date": None,
+            "last_note": None,
+            "next_action": None,
+            "last_updated_at": None,
+            "created_at": first_task.created_at,
+            "project_id": inbox.id,
+            "project_name": inbox.name,
+            "client_id": agenda_ai.id,
+            "client_name": agenda_ai.name,
+            "updates_count": 0,
+            "latest_update": None,
+        }
+
+        with patch("app.services.reference_resolver.get_all_clients", return_value=[agenda_ai]), patch(
+            "app.services.query_response_service.get_open_tasks_by_client_id",
+            return_value=[first_task, second_task],
+        ), patch(
+            "app.services.query_response_service.get_tasks_by_client_id",
+            return_value=[first_task, second_task],
+        ), patch(
+            "app.services.reference_resolver.get_all_tasks",
+            return_value=[first_task, second_task],
+        ), patch(
+            "app.services.query_response_service.get_task_operational_summary",
+            return_value=task_summary,
+        ):
+            first = process_conversation_turn("decime las tareas de agenda ai", conversation_context={})
+            second = process_conversation_turn(
+                "la primera",
+                conversation_context=first["conversation_context"],
+            )
+
+        self.assertIn("comprar cafe", second["response_text"].lower())
+        self.assertEqual(second["conversation_context"].get("task", {}).get("name"), "Comprar cafe")
+
+    def test_ordinal_followup_without_context_does_not_invent(self):
+        result = process_conversation_turn("Cerra la primera.", conversation_context={})
+
+        self.assertIn("no pude ubicar una entidad clara", result["response_text"].lower())
+        self.assertEqual(result["conversation_context"].get("scope"), "none")
 
 
 if __name__ == "__main__":

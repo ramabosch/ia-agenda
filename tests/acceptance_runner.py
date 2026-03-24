@@ -966,6 +966,34 @@ DEFAULT_SCENARIOS = [
         ],
     ),
     Scenario(
+        scenario_id="ORD-001",
+        title="Accion ordinal contextual sobre lista reciente",
+        category="continuity",
+        severity="high",
+        tags=["daily", "continuity", "ordinal"],
+        turns=[
+            ScenarioTurn(
+                "decime las tareas de Cam",
+                {
+                    "should_not_error": True,
+                    "should_have_response": True,
+                    "should_have_intent": "get_open_tasks_by_client_name",
+                    "should_contain_any": ["Tareas de Cam", "Revisar indicadores"],
+                },
+            ),
+            ScenarioTurn(
+                "Cerra la primera.",
+                {
+                    "should_not_error": True,
+                    "should_have_response": True,
+                    "should_have_context_reuse": True,
+                    "should_have_action_status": "executed",
+                    "should_contain_any": ["actualice la tarea", "Revisar indicadores"],
+                },
+            ),
+        ],
+    ),
+    Scenario(
         scenario_id="TMP-001",
         title="Temporalidad diaria real",
         category="temporal",

@@ -556,7 +556,7 @@ def _filter_previous_candidates(scope: str, candidates: list[Any], context: dict
     if not use_previous_candidates:
         return []
 
-    previous_candidates = context.get("clarification_candidates") or []
+    previous_candidates = _context_candidate_pool(context, scope=scope)
     allowed_ids = {item.get("id") for item in previous_candidates if item.get("scope") == scope}
     if not allowed_ids:
         return []
@@ -574,11 +574,7 @@ def _resolve_from_previous_candidates(
     if not use_previous_candidates:
         return None
 
-    previous_candidates = [
-        item
-        for item in (context.get("clarification_candidates") or [])
-        if item.get("scope") == scope
-    ]
+    previous_candidates = _context_candidate_pool(context, scope=scope)
     if not previous_candidates:
         return None
 
@@ -638,7 +634,7 @@ def _resolve_from_ordinal_candidate(
     if ordinal_index is None or ordinal_index < 0:
         return None
 
-    previous_candidates = list(context.get("clarification_candidates") or [])
+    previous_candidates = list(_context_candidate_pool(context))
     if ordinal_index >= len(previous_candidates):
         return None
 
@@ -666,6 +662,31 @@ def _resolve_from_ordinal_candidate(
         },
         "matches": [candidate],
     }
+
+
+def _context_candidate_pool(context: dict[str, Any], scope: str | None = None) -> list[dict[str, Any]]:
+    pools = []
+    candidate_entities = context.get("candidate_entities") or []
+    clarification_candidates = context.get("clarification_candidates") or []
+    if isinstance(candidate_entities, list):
+        pools.extend(candidate_entities)
+    if isinstance(clarification_candidates, list):
+        pools.extend(clarification_candidates)
+
+    filtered: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, Any]] = set()
+    for item in pools:
+        if not isinstance(item, dict):
+            continue
+        item_scope = item.get("scope")
+        if scope and item_scope != scope:
+            continue
+        key = (item_scope, item.get("id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        filtered.append(item)
+    return filtered
 
 
 def _load_entity_by_scope_id(scope: str | None, entity_id: int | None):

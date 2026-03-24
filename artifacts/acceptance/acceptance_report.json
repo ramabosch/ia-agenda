@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-03-23T00:34:57.878617",
+  "generated_at": "2026-03-23T21:02:51.893790",
   "scenario_count": 7,
   "selected_filters": {
     "categories": [],
@@ -1270,6 +1270,48 @@
               "id": 1,
               "name": "Cam"
             },
+            "candidate_entities": [
+              {
+                "scope": "project",
+                "id": 10,
+                "name": "Dashboard comercial",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 1
+              },
+              {
+                "scope": "project",
+                "id": 11,
+                "name": "Dashboard ventas",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 2
+              },
+              {
+                "scope": "project",
+                "id": 12,
+                "name": "Automatizacion",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 3
+              },
+              {
+                "scope": "project",
+                "id": 13,
+                "name": "Onboarding",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 4
+              }
+            ],
+            "candidate_entity_type": "project",
+            "candidate_source": "project_list",
+            "shown_order": [
+              10,
+              11,
+              12,
+              13
+            ],
             "response_snapshot": {
               "response_kind": "recommendation",
               "scope": "client",
@@ -2692,6 +2734,48 @@
               "id": 1,
               "name": "Cam"
             },
+            "candidate_entities": [
+              {
+                "scope": "project",
+                "id": 10,
+                "name": "Dashboard comercial",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 1
+              },
+              {
+                "scope": "project",
+                "id": 11,
+                "name": "Dashboard ventas",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 2
+              },
+              {
+                "scope": "project",
+                "id": 12,
+                "name": "Automatizacion",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 3
+              },
+              {
+                "scope": "project",
+                "id": 13,
+                "name": "Onboarding",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 4
+              }
+            ],
+            "candidate_entity_type": "project",
+            "candidate_source": "project_list",
+            "shown_order": [
+              10,
+              11,
+              12,
+              13
+            ],
             "response_snapshot": {
               "response_kind": "recommendation",
               "scope": "contextual_client",
@@ -3047,6 +3131,7 @@
             "intent": "get_operational_summary",
             "entity_hint": "cam",
             "_parser_source": "rules",
+            "_parser_decision": "rules_over_llm",
             "_resolved_references": {
               "scope": "client",
               "source": "explicit",
@@ -3392,6 +3477,48 @@
               "id": 1,
               "name": "Cam"
             },
+            "candidate_entities": [
+              {
+                "scope": "project",
+                "id": 10,
+                "name": "Dashboard comercial",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 1
+              },
+              {
+                "scope": "project",
+                "id": 11,
+                "name": "Dashboard ventas",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 2
+              },
+              {
+                "scope": "project",
+                "id": 12,
+                "name": "Automatizacion",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 3
+              },
+              {
+                "scope": "project",
+                "id": 13,
+                "name": "Onboarding",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 4
+              }
+            ],
+            "candidate_entity_type": "project",
+            "candidate_source": "project_list",
+            "shown_order": [
+              10,
+              11,
+              12,
+              13
+            ],
             "response_snapshot": {
               "response_kind": "summary",
               "scope": "client",
@@ -3787,6 +3914,48 @@
               "id": 1,
               "name": "Cam"
             },
+            "candidate_entities": [
+              {
+                "scope": "project",
+                "id": 10,
+                "name": "Dashboard comercial",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 1
+              },
+              {
+                "scope": "project",
+                "id": 11,
+                "name": "Dashboard ventas",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 2
+              },
+              {
+                "scope": "project",
+                "id": 12,
+                "name": "Automatizacion",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 3
+              },
+              {
+                "scope": "project",
+                "id": 13,
+                "name": "Onboarding",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 4
+              }
+            ],
+            "candidate_entity_type": "project",
+            "candidate_source": "project_list",
+            "shown_order": [
+              10,
+              11,
+              12,
+              13
+            ],
             "response_snapshot": {
               "response_kind": "summary",
               "scope": "client",
@@ -4080,6 +4249,48 @@
               "id": 1,
               "name": "Cam"
             },
+            "candidate_entities": [
+              {
+                "scope": "project",
+                "id": 10,
+                "name": "Dashboard comercial",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 1
+              },
+              {
+                "scope": "project",
+                "id": 11,
+                "name": "Dashboard ventas",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 2
+              },
+              {
+                "scope": "project",
+                "id": 12,
+                "name": "Automatizacion",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 3
+              },
+              {
+                "scope": "project",
+                "id": 13,
+                "name": "Onboarding",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 4
+              }
+            ],
+            "candidate_entity_type": "project",
+            "candidate_source": "project_list",
+            "shown_order": [
+              10,
+              11,
+              12,
+              13
+            ],
             "response_snapshot": {
               "response_kind": "friction",
               "scope": "contextual_client",
@@ -4722,6 +4933,48 @@
               "id": 1,
               "name": "Cam"
             },
+            "candidate_entities": [
+              {
+                "scope": "project",
+                "id": 10,
+                "name": "Dashboard comercial",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 1
+              },
+              {
+                "scope": "project",
+                "id": 11,
+                "name": "Dashboard ventas",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 2
+              },
+              {
+                "scope": "project",
+                "id": 12,
+                "name": "Automatizacion",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 3
+              },
+              {
+                "scope": "project",
+                "id": 13,
+                "name": "Onboarding",
+                "confidence": 0.99,
+                "client_name": "Cam",
+                "shown_order": 4
+              }
+            ],
+            "candidate_entity_type": "project",
+            "candidate_source": "project_list",
+            "shown_order": [
+              10,
+              11,
+              12,
+              13
+            ],
             "response_snapshot": {
               "response_kind": "friction",
               "scope": "contextual_client",

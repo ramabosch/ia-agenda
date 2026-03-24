@@ -4,7 +4,7 @@ from app.channels.telegram.adapter import (
     extract_telegram_message,
     get_telegram_bot_token,
 )
-from app.channels.telegram.context_store import InMemoryTelegramContextStore
+from app.channels.telegram.context_store import InMemoryTelegramContextStore, PersistentTelegramContextStore
 from app.channels.telegram.polling import (
     is_chat_allowed,
     is_telegram_identity_allowed,
@@ -17,6 +17,7 @@ from app.channels.telegram.polling import (
 __all__ = [
     "TelegramChannelAdapter",
     "InMemoryTelegramContextStore",
+    "PersistentTelegramContextStore",
     "build_telegram_conversation_key",
     "extract_telegram_message",
     "get_telegram_bot_token",

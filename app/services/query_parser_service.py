@@ -44,6 +44,10 @@ ORDINAL_REFERENCE_MAP = {
     "el segundo": 1,
     "segunda": 1,
     "segundo": 1,
+    "la tercera": 2,
+    "el tercero": 2,
+    "tercera": 2,
+    "tercero": 2,
 }
 
 
@@ -89,6 +93,14 @@ def _parse_agenda_intents(normalized: str) -> dict | None:
 def _parse_agenda_creation_intents(normalized: str) -> dict | None:
     day_pattern = r"(hoy|mañana|manana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|esta semana)"
     time_pattern = r"(\d{1,2}(?::\d{2})?\s*hs?|\d{1,2}(?::\d{2})?)"
+
+    match = re.search(rf"^agenda\s+(.+?)\s+para\s+(?:el\s+)?{day_pattern}\s+a\s+las\s+{time_pattern}$", normalized)
+    if match:
+        return _build_agenda_creation_payload("event", match.group(2), match.group(3), match.group(1))
+
+    match = re.search(rf"^agenda\s+(.+?)\s+para\s+(?:el\s+)?{day_pattern}$", normalized)
+    if match:
+        return _build_agenda_creation_payload("event", match.group(2), None, match.group(1))
 
     match = re.search(rf"^agend(?:a|á)me\s+(?:para\s+)?(?:el\s+)?{day_pattern}\s+a\s+las\s+{time_pattern}\s+(.+)$", normalized)
     if match:
@@ -754,6 +766,10 @@ def _parse_ambiguity_intents(normalized: str) -> dict | None:
 
 
 def _parse_read_intents(normalized: str) -> dict | None:
+    ordinal_action = _parse_ordinal_reference_action(normalized)
+    if ordinal_action:
+        return ordinal_action
+
     ordinal_index = _extract_ordinal_index(normalized)
     if ordinal_index is not None:
         return {
@@ -763,7 +779,23 @@ def _parse_read_intents(normalized: str) -> dict | None:
             "entity_hint": normalized,
         }
 
-    if normalized in {"mostrame mi inbox", "mostrame el inbox", "mostrame inbox", "mi inbox", "inbox"}:
+    if normalized in {
+        "mostrame mi inbox",
+        "mostrame el inbox",
+        "mostrame inbox",
+        "mi inbox",
+        "inbox",
+        "que tareas tengo en el inbox",
+        "que hay en el inbox",
+        "decime las tareas del inbox",
+    }:
+        return {
+            "intent": "get_tasks_by_project_name",
+            "project_name": "Inbox",
+            "expected_scope": "project",
+        }
+
+    if re.search(r"^[¿]?(?:que\s+tareas\s+tengo|que\s+hay|decime\s+las\s+tareas)\s+en\s+(?:el\s+)?inbox\??$", normalized):
         return {
             "intent": "get_tasks_by_project_name",
             "project_name": "Inbox",
@@ -1576,6 +1608,9 @@ def _parse_read_intents(normalized: str) -> dict | None:
 
 def _parse_task_update_intents(normalized: str) -> dict | None:
     contextual_payload = _extract_contextual_scope(normalized)
+    ordinal_action = _parse_ordinal_task_action(normalized)
+    if ordinal_action:
+        return ordinal_action
 
     match = re.search(r"^actualiza\s+la\s+tarea\s+de\s+(.+?)\s+del\s+(.+)$", normalized)
     if match:
@@ -1712,9 +1747,9 @@ def _parse_task_update_intents(normalized: str) -> dict | None:
             )
             return payload
 
-    if any(phrase in normalized for phrase in ["cerra", "marca"]):
+    if any(phrase in normalized for phrase in ["cerra", "marca", "completa"]):
         match = re.search(
-            r"(?:cerra|marca)\s+(.+?)\s+como\s+(en progreso|completada|completa|hecha|bloqueada|pendiente)$",
+            r"(?:cerra|marca|completa)\s+(.+?)\s+como\s+(en progreso|completada|completa|hecha|bloqueada|pendiente)$",
             normalized,
         )
         if match:
@@ -1727,7 +1762,7 @@ def _parse_task_update_intents(normalized: str) -> dict | None:
             )
             return payload
 
-        match = re.search(r"(?:cerra)\s+(.+)$", normalized)
+        match = re.search(r"(?:cerra|completa)\s+(.+)$", normalized)
         if match:
             payload = _split_task_scope(match.group(1).strip(), contextual_payload)
             payload.update({"intent": "update_task_status", "new_status": "hecha"})
@@ -1921,5 +1956,49 @@ def _split_task_scope(raw_target: str, contextual_payload: dict) -> dict:
 
 
 def _extract_ordinal_index(value: str | None) -> int | None:
-    normalized = (value or "").strip().lower()
+    normalized = (value or "").strip().lower().strip(" .,:;!?¿")
     return ORDINAL_REFERENCE_MAP.get(normalized)
+
+
+def _parse_ordinal_task_action(normalized: str) -> dict | None:
+    match = re.search(r"^(?:cerra|completa|borra|mostra|mostrame)\s+(.+)$", normalized)
+    if not match:
+        return None
+
+    target = match.group(1).strip()
+    ordinal_index = _extract_ordinal_index(target)
+    if ordinal_index is None:
+        return None
+
+    return {
+        "intent": "clarify_entity_reference",
+        "use_previous_candidates": True,
+        "ordinal_index": ordinal_index,
+        "entity_hint": target,
+    }
+
+
+def _parse_ordinal_reference_action(normalized: str) -> dict | None:
+    action_map = {
+        "cerra": "close",
+        "completa": "close",
+        "borra": "delete",
+        "mostra": "show",
+        "mostrame": "show",
+    }
+    match = re.search(r"^(cerra|completa|borra|mostra|mostrame)\s+(.+)$", normalized)
+    if not match:
+        return None
+
+    ordinal_target = match.group(2).strip()
+    ordinal_index = _extract_ordinal_index(ordinal_target)
+    if ordinal_index is None:
+        return None
+
+    return {
+        "intent": "clarify_entity_reference",
+        "use_previous_candidates": True,
+        "ordinal_index": ordinal_index,
+        "entity_hint": ordinal_target,
+        "ordinal_action": action_map.get(match.group(1)),
+    }

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 from copy import deepcopy
 
-from app.channels.telegram.context_store import InMemoryTelegramContextStore
+from app.channels.telegram.context_store import InMemoryTelegramContextStore, PersistentTelegramContextStore
 from app.services.conversation_runtime_service import process_conversation_turn
 
 
@@ -119,11 +120,11 @@ class TelegramChannelAdapter:
     def __init__(
         self,
         *,
-        context_store: InMemoryTelegramContextStore | None = None,
+        context_store=None,
         orchestrator=None,
         persist_log: bool = True,
     ):
-        self.context_store = context_store or InMemoryTelegramContextStore()
+        self.context_store = context_store or PersistentTelegramContextStore()
         self.orchestrator = orchestrator
         self.persist_log = persist_log
 
@@ -153,10 +154,17 @@ class TelegramChannelAdapter:
                 conversation_key=effective_conversation_key,
                 command=command,
             )
-            self.context_store.save_context(
-                effective_conversation_key,
-                command_result.get("conversation_context") or {},
-            )
+            if command != "/reset":
+                self.context_store.save_context(
+                    effective_conversation_key,
+                    command_result.get("conversation_context") or {},
+                    metadata=_build_context_metadata(
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        chat_type=chat_type,
+                        message_thread_id=message_thread_id,
+                    ),
+                )
             return command_result
 
         current_context = self.context_store.get_context(effective_conversation_key)
@@ -175,7 +183,26 @@ class TelegramChannelAdapter:
             persist_log=self.persist_log,
         )
         updated_context = result.get("conversation_context") or {}
-        self.context_store.save_context(effective_conversation_key, updated_context)
+        debug_mode = bool(((updated_context or {}).get("assistant_memory") or {}).get("debug_mode"))
+        response_text = result["response_text"]
+        if debug_mode:
+            debug_block = _build_debug_block(result)
+            response_text = f"{response_text}\n\n{debug_block}"
+            _print_debug_console(
+                chat_id=chat_id,
+                conversation_key=effective_conversation_key,
+                debug_payload=_build_debug_payload(result),
+            )
+        self.context_store.save_context(
+            effective_conversation_key,
+            updated_context,
+            metadata=_build_context_metadata(
+                chat_id=chat_id,
+                user_id=user_id,
+                chat_type=chat_type,
+                message_thread_id=message_thread_id,
+            ),
+        )
         return {
             "channel": "telegram",
             "chat_id": str(chat_id),
@@ -185,14 +212,14 @@ class TelegramChannelAdapter:
             "conversation_key": effective_conversation_key,
             "input_text": text,
             "normalized_input_text": normalized_text,
-            "response_text": result["response_text"],
+            "response_text": response_text,
             "parsed_query": result["parsed_query"],
             "conversation_context": deepcopy(updated_context),
             "audit_trace": deepcopy(result.get("audit_trace") or {}),
             "resolved_references": deepcopy(result.get("resolved_references") or {}),
             "send_message_payload": {
                 "chat_id": str(chat_id),
-                "text": result["response_text"],
+                "text": response_text,
             },
         }
 
@@ -256,7 +283,7 @@ class TelegramChannelAdapter:
             updated_context = dict(current_context or {})
             updated_context["assistant_memory"] = assistant_memory
             mode = "activado" if next_value else "desactivado"
-            response_text = f"Modo debug {mode}. Voy a incluir el JSON crudo del parser antes de ejecutar acciones."
+            response_text = f"Modo debug {mode}. Voy a adjuntar un bloque corto de parser/resolucion y tambien lo voy a imprimir en consola."
         else:
             response_text = (
                 "Comandos disponibles:\n"
@@ -309,6 +336,89 @@ def _context_entity_name(context: dict | None) -> str | None:
     return None
 
 
+def _build_debug_payload(result: dict) -> dict:
+    parsed_query = result.get("parsed_query") or {}
+    resolved_references = result.get("resolved_references") or {}
+    audit_trace = result.get("audit_trace") or {}
+    conversation_context = result.get("conversation_context") or {}
+    pending_action = (conversation_context.get("pending_action") or {}).get("intent")
+    candidate_entities = conversation_context.get("candidate_entities") or []
+    entity_resolved = _summarize_resolved_references(resolved_references) or _summarize_candidate_resolution(
+        conversation_context,
+        parsed_query,
+    )
+    return {
+        "intent": parsed_query.get("intent"),
+        "parser_source": parsed_query.get("_parser_source"),
+        "parser_decision": parsed_query.get("_parser_decision"),
+        "ordinal_index": parsed_query.get("ordinal_index"),
+        "candidate_count": len(candidate_entities) or len((conversation_context.get("clarification_candidates") or [])),
+        "pending_action": pending_action,
+        "entity_resolved": entity_resolved,
+        "resolved_references": _summarize_resolved_references(resolved_references),
+        "action_status": audit_trace.get("action_status"),
+    }
+
+
+def _build_debug_block(result: dict) -> str:
+    payload = _build_debug_payload(result)
+    lines = ["[debug]"]
+    lines.append(f"intent: {payload['intent'] or 'unknown'}")
+    lines.append(f"parser: {payload['parser_source'] or 'n/d'}")
+    if payload.get("parser_decision"):
+        lines.append(f"decision: {payload['parser_decision']}")
+    if payload.get("ordinal_index") is not None:
+        lines.append(f"ordinal_index: {payload['ordinal_index']}")
+    if payload.get("candidate_count"):
+        lines.append(f"candidate_count: {payload['candidate_count']}")
+    if payload.get("pending_action"):
+        lines.append(f"pending_action: {payload['pending_action']}")
+    lines.append(f"action_status: {payload['action_status'] or 'n/d'}")
+    if payload.get("entity_resolved"):
+        lines.append(f"entity_resolved: {payload['entity_resolved']}")
+    resolved_summary = payload.get("resolved_references") or "sin referencias resueltas"
+    lines.append(f"resolved: {resolved_summary}")
+    return "\n".join(lines)
+
+
+def _print_debug_console(*, chat_id: str | int, conversation_key: str, debug_payload: dict) -> None:
+    print(
+        "[telegram-debug] "
+        + json.dumps(
+            {
+                "chat_id": str(chat_id),
+                "conversation_key": conversation_key,
+                **debug_payload,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def _summarize_resolved_references(resolved_references: dict) -> str:
+    parts: list[str] = []
+    for scope in ("client", "project", "task"):
+        resolved = ((resolved_references.get(scope) or {}).get("resolved") or {})
+        if resolved.get("name"):
+            parts.append(f"{scope}={resolved.get('name')}")
+    return ", ".join(parts)
+
+
+def _summarize_candidate_resolution(conversation_context: dict, parsed_query: dict) -> str:
+    ordinal_index = parsed_query.get("ordinal_index")
+    if ordinal_index is None:
+        return ""
+    candidate_entities = list(conversation_context.get("candidate_entities") or [])
+    clarification_candidates = list(conversation_context.get("clarification_candidates") or [])
+    candidates = candidate_entities or clarification_candidates
+    if ordinal_index >= len(candidates):
+        return ""
+    candidate = candidates[ordinal_index] or {}
+    scope = candidate.get("scope") or "entity"
+    name = candidate.get("name") or "sin nombre"
+    return f"{scope}={name}"
+
+
 def _build_friendly_telegram_summary(
     *,
     reports: list[dict],
@@ -320,3 +430,18 @@ def _build_friendly_telegram_summary(
         if command_text:
             lines.append(command_text)
     return "\n".join(lines).strip()
+
+
+def _build_context_metadata(
+    *,
+    chat_id: str | int,
+    user_id: str | int | None,
+    chat_type: str | None,
+    message_thread_id: str | int | None,
+) -> dict:
+    return {
+        "chat_id": str(chat_id),
+        "user_id": str(user_id) if user_id not in (None, "") else None,
+        "chat_type": chat_type,
+        "message_thread_id": str(message_thread_id) if message_thread_id not in (None, "") else None,
+    }

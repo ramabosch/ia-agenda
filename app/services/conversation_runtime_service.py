@@ -90,8 +90,18 @@ def _merge_short_term_context(
         updated_context["clarification_candidates"] = deepcopy(previous_context.get("clarification_candidates"))
     if not updated_context.get("clarification_expected_scope") and previous_context.get("clarification_expected_scope"):
         updated_context["clarification_expected_scope"] = previous_context.get("clarification_expected_scope")
+    if not updated_context.get("candidate_entities") and previous_context.get("candidate_entities"):
+        updated_context["candidate_entities"] = deepcopy(previous_context.get("candidate_entities"))
+    if not updated_context.get("candidate_entity_type") and previous_context.get("candidate_entity_type"):
+        updated_context["candidate_entity_type"] = previous_context.get("candidate_entity_type")
+    if not updated_context.get("candidate_source") and previous_context.get("candidate_source"):
+        updated_context["candidate_source"] = previous_context.get("candidate_source")
+    if not updated_context.get("shown_order") and previous_context.get("shown_order"):
+        updated_context["shown_order"] = deepcopy(previous_context.get("shown_order"))
     if not updated_context.get("channel_identity") and previous_context.get("channel_identity"):
         updated_context["channel_identity"] = deepcopy(previous_context.get("channel_identity"))
+    if not updated_context.get("assistant_memory") and previous_context.get("assistant_memory"):
+        updated_context["assistant_memory"] = deepcopy(previous_context.get("assistant_memory"))
     updated_context.pop("_new_session", None)
 
     last_action_trace = _build_last_action_trace(parsed_query)

@@ -170,6 +170,66 @@ class TelegramChannelTests(unittest.TestCase):
         self.assertIn("message_thread_id: 77", result["response_text"])
         self.assertIn(conversation_key, result["response_text"])
 
+    def test_debug_command_adds_useful_block_and_console_output(self):
+        adapter = TelegramChannelAdapter(
+            context_store=InMemoryTelegramContextStore(),
+            persist_log=False,
+        )
+
+        enable_result = adapter.handle_incoming_text(
+            chat_id="debug-chat",
+            user_id="123",
+            chat_type="private",
+            text="/debug",
+        )
+
+        self.assertIn("modo debug activado", enable_result["response_text"].lower())
+
+        mocked_result = {
+            "response_text": "Resumen listo.",
+            "parsed_query": {
+                "intent": "get_operational_summary",
+                "_parser_source": "rules",
+                "_parser_decision": "rules_over_llm",
+                "ordinal_index": 0,
+            },
+            "conversation_context": {
+                "_isolated": True,
+                "scope": "client",
+                "assistant_memory": {"debug_mode": True},
+                "pending_action": {"intent": "update_task_status"},
+                "candidate_entities": [
+                    {"scope": "task", "id": 1, "name": "Comprar cafe", "shown_order": 1},
+                    {"scope": "task", "id": 2, "name": "Revisar stock", "shown_order": 2},
+                ],
+            },
+            "audit_trace": {"action_status": "informational"},
+            "resolved_references": {
+                "client": {"resolved": {"id": 1, "name": "Cam"}},
+            },
+        }
+
+        with patch("app.channels.telegram.adapter.process_conversation_turn", return_value=mocked_result), patch(
+            "builtins.print"
+        ) as print_mock:
+            result = adapter.handle_incoming_text(
+                chat_id="debug-chat",
+                user_id="123",
+                chat_type="private",
+                text="comentame en que andamos con Cam",
+            )
+
+        self.assertIn("[debug]", result["response_text"])
+        self.assertIn("intent: get_operational_summary", result["response_text"])
+        self.assertIn("parser: rules", result["response_text"])
+        self.assertIn("action_status: informational", result["response_text"])
+        self.assertIn("ordinal_index: 0", result["response_text"])
+        self.assertIn("candidate_count: 2", result["response_text"])
+        self.assertIn("pending_action: update_task_status", result["response_text"])
+        self.assertIn("client=Cam", result["response_text"])
+        self.assertIn("[debug]", result["send_message_payload"]["text"])
+        print_mock.assert_called_once()
+
     def test_adapter_supports_personal_agenda_creation(self):
         adapter = TelegramChannelAdapter(
             context_store=InMemoryTelegramContextStore(),

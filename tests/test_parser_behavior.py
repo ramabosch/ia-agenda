@@ -241,6 +241,7 @@ class ParserBehaviorTests(unittest.TestCase):
     def test_parse_agenda_queries(self):
         daily_pulse = parse_user_query("que hay para hoy")
         create_event = parse_user_query("agendame manana a las 10 una reunion con Cam")
+        create_event_natural = parse_user_query("Agenda una reunion con CAM para manana a las 10:00")
         create_reminder = parse_user_query("recordame manana revisar indicadores")
         create_friday = parse_user_query("agendame para el viernes a las 16 llamar a Rosario Capilar")
         missing_date = parse_user_query("agendame revisar indicadores")
@@ -257,6 +258,10 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(create_event["agenda_date_hint"], "manana")
         self.assertEqual(create_event["agenda_time_hint"], "10")
         self.assertEqual(create_event["agenda_title"], "reunion con cam")
+        self.assertEqual(create_event_natural["intent"], "create_agenda_item")
+        self.assertEqual(create_event_natural["agenda_title"], "reunion con cam")
+        self.assertEqual(create_event_natural["agenda_date_hint"], "manana")
+        self.assertEqual(create_event_natural["agenda_time_hint"], "10:00")
         self.assertEqual(create_reminder["agenda_kind"], "reminder")
         self.assertEqual(create_reminder["agenda_date_hint"], "manana")
         self.assertEqual(create_friday["agenda_date_hint"], "viernes")
@@ -362,17 +367,35 @@ class ParserBehaviorTests(unittest.TestCase):
     def test_parse_contextual_followups(self):
         projects = parse_user_query("y sus proyectos?")
         close_task = parse_user_query("cerrala")
+        close_first = parse_user_query("Cerra la primera.")
+        show_first = parse_user_query("mostrame la primera")
+        delete_third = parse_user_query("borra la tercera")
         lower_priority = parse_user_query("bajale la prioridad a la otra")
         inbox = parse_user_query("mostrame mi inbox")
+        inbox_question = parse_user_query("¿Que tareas tengo en el Inbox?")
+        inbox_loose = parse_user_query("Que hay en el inbox?")
+        inbox_natural = parse_user_query("decime las tareas del inbox")
         first = parse_user_query("la primera")
         self.assertEqual(projects["intent"], "get_projects_by_client_name")
         self.assertEqual(projects["client_name"], "este cliente")
         self.assertEqual(close_task["intent"], "update_task_status")
         self.assertEqual(close_task["task_name"], "eso")
+        self.assertEqual(close_first["intent"], "clarify_entity_reference")
+        self.assertEqual(close_first["ordinal_index"], 0)
+        self.assertEqual(close_first["ordinal_action"], "close")
+        self.assertEqual(show_first["intent"], "clarify_entity_reference")
+        self.assertEqual(show_first["ordinal_index"], 0)
+        self.assertEqual(show_first["ordinal_action"], "show")
+        self.assertEqual(delete_third["intent"], "clarify_entity_reference")
+        self.assertEqual(delete_third["ordinal_index"], 2)
+        self.assertEqual(delete_third["ordinal_action"], "delete")
         self.assertEqual(lower_priority["intent"], "update_task_priority")
         self.assertEqual(lower_priority["priority_direction"], "down")
         self.assertEqual(inbox["intent"], "get_tasks_by_project_name")
         self.assertEqual(inbox["project_name"], "Inbox")
+        self.assertEqual(inbox_question["intent"], "get_tasks_by_project_name")
+        self.assertEqual(inbox_loose["intent"], "get_tasks_by_project_name")
+        self.assertEqual(inbox_natural["intent"], "get_tasks_by_project_name")
         self.assertEqual(first["intent"], "clarify_entity_reference")
         self.assertEqual(first["ordinal_index"], 0)
 
@@ -398,6 +421,47 @@ class ParserBehaviorTests(unittest.TestCase):
         self.assertEqual(parsed["intent"], "update_task_status")
         self.assertEqual(parsed["_parser_source"], "rules")
         self.assertEqual(parsed["_parser_decision"], "rules_over_llm")
+
+    def test_hybrid_prefers_more_complete_rules_for_agenda_and_inbox(self):
+        llm_agenda = {
+            "intent": "create_agenda_item",
+            "agenda_kind": "event",
+            "agenda_date_hint": "manana",
+            "agenda_time_hint": "10:00",
+            "agenda_title": None,
+            "_parser_source": "llm",
+        }
+        with patch("app.services.hybrid_parser_service.parse_query_with_llm", return_value=llm_agenda):
+            parsed_agenda = parse_user_query_hybrid("Agenda una reunion con CAM para manana a las 10:00")
+
+        self.assertEqual(parsed_agenda["intent"], "create_agenda_item")
+        self.assertEqual(parsed_agenda["agenda_title"], "reunion con cam")
+        self.assertEqual(parsed_agenda["_parser_source"], "rules")
+        self.assertEqual(parsed_agenda["_parser_decision"], "rules_over_llm")
+
+        llm_inbox = {
+            "intent": "get_today_queries",
+            "_parser_source": "llm",
+        }
+        with patch("app.services.hybrid_parser_service.parse_query_with_llm", return_value=llm_inbox):
+            parsed_inbox = parse_user_query_hybrid("Que hay en el inbox?")
+
+        self.assertEqual(parsed_inbox["intent"], "get_tasks_by_project_name")
+        self.assertEqual(parsed_inbox["project_name"], "Inbox")
+        self.assertEqual(parsed_inbox["_parser_source"], "rules")
+
+        llm_ordinal = {
+            "intent": "complete_task_by_name",
+            "task_name": "primera",
+            "_parser_source": "llm",
+        }
+        with patch("app.services.hybrid_parser_service.parse_query_with_llm", return_value=llm_ordinal):
+            parsed_ordinal = parse_user_query_hybrid("Cerra la primera.")
+
+        self.assertEqual(parsed_ordinal["intent"], "clarify_entity_reference")
+        self.assertEqual(parsed_ordinal["ordinal_index"], 0)
+        self.assertEqual(parsed_ordinal["ordinal_action"], "close")
+        self.assertEqual(parsed_ordinal["_parser_source"], "rules")
 
 
 if __name__ == "__main__":

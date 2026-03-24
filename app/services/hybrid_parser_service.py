@@ -63,7 +63,7 @@ def parse_user_query_hybrid(query: str) -> dict:
 
     if _should_prefer_rules(query, rules_result, llm_result):
         rules_result["_parser_source"] = "rules"
-        if llm_intent not in (None, "", "unknown") and llm_intent != rules_intent:
+        if llm_intent not in (None, "", "unknown"):
             rules_result["_parser_decision"] = "rules_over_llm"
         return rules_result
 
@@ -90,8 +90,11 @@ def _pick_primary_action(actions: list[dict] | None) -> dict | None:
 def _should_prefer_rules(query: str, rules_result: dict, llm_result: dict | None) -> bool:
     rules_intent = rules_result.get("intent", "unknown")
     llm_intent = (llm_result or {}).get("intent", "unknown")
+    normalized_query = query.strip().lower()
 
     if rules_intent not in (None, "", "unknown"):
+        if _rules_have_more_useful_fields(rules_result, llm_result):
+            return True
         if rules_intent in EXECUTIVE_INTENTS:
             return True
         if rules_intent in CLARIFICATION_INTENTS:
@@ -99,6 +102,8 @@ def _should_prefer_rules(query: str, rules_result: dict, llm_result: dict | None
         if rules_intent in AUDIT_INTENTS:
             return True
         if rules_intent in SUMMARY_INTENTS:
+            return True
+        if "inbox" in normalized_query and rules_result.get("project_name") == "Inbox":
             return True
         if _is_short_or_follow_up(query):
             return True
@@ -170,3 +175,40 @@ def _is_contextual_result(result: dict) -> bool:
         "cliente actual",
     }
     return any(result.get(field) in contextual_values for field in ("task_name", "project_name", "client_name"))
+
+
+def _rules_have_more_useful_fields(rules_result: dict, llm_result: dict | None) -> bool:
+    if not llm_result:
+        return False
+
+    useful_fields = (
+        "client_name",
+        "project_name",
+        "task_name",
+        "entity_hint",
+        "agenda_title",
+        "agenda_date_hint",
+        "agenda_time_hint",
+        "agenda_query_scope",
+        "ordinal_index",
+    )
+    rules_score = sum(1 for field in useful_fields if rules_result.get(field) not in (None, "", [], {}))
+    llm_score = sum(1 for field in useful_fields if llm_result.get(field) not in (None, "", [], {}))
+
+    if rules_score > llm_score:
+        return True
+
+    if rules_result.get("intent") == "create_agenda_item":
+        return (
+            bool(rules_result.get("agenda_title"))
+            and bool(rules_result.get("agenda_date_hint"))
+            and (
+                not llm_result.get("agenda_title")
+                or not llm_result.get("agenda_date_hint")
+            )
+        )
+
+    if rules_result.get("project_name") == "Inbox" and llm_result.get("project_name") != "Inbox":
+        return True
+
+    return False
