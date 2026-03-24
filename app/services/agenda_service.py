@@ -20,6 +20,22 @@ WEEKDAY_INDEX = {
     "domingo": 6,
 }
 
+NUMBER_WORDS = {
+    "un": 1,
+    "una": 1,
+    "uno": 1,
+    "dos": 2,
+    "tres": 3,
+    "cuatro": 4,
+    "cinco": 5,
+    "seis": 6,
+    "siete": 7,
+    "ocho": 8,
+    "nueve": 9,
+    "diez": 10,
+    "quince": 15,
+}
+
 _DB_READY = False
 
 
@@ -191,6 +207,73 @@ def resolve_agenda_date_hint(date_hint: str | None, *, today: date | None = None
             "error": None,
         }
 
+    if normalized in {"la semana que viene", "semana que viene", "proxima semana", "la proxima semana"}:
+        start_of_current_week = today - timedelta(days=today.weekday())
+        start_of_next_week = start_of_current_week + timedelta(days=7)
+        end_of_next_week = start_of_next_week + timedelta(days=6)
+        return {
+            "resolved": True,
+            "scope": "next_week",
+            "target_date": None,
+            "start_date": start_of_next_week,
+            "end_date": end_of_next_week,
+            "label": "la semana que viene",
+            "error": None,
+        }
+
+    if normalized in {"proximos dias", "los proximos dias"}:
+        start_date = today + timedelta(days=1)
+        end_date = today + timedelta(days=7)
+        return {
+            "resolved": True,
+            "scope": "next_days",
+            "target_date": None,
+            "start_date": start_date,
+            "end_date": end_date,
+            "label": "los proximos dias",
+            "error": None,
+        }
+
+    if normalized in {"que se viene", "mas adelante", "en el futuro", "futuro cercano"}:
+        start_date = today + timedelta(days=1)
+        end_date = today + timedelta(days=30)
+        return {
+            "resolved": True,
+            "scope": "future_horizon",
+            "target_date": None,
+            "start_date": start_date,
+            "end_date": end_date,
+            "label": "mas adelante",
+            "error": None,
+        }
+
+    relative_weeks = _parse_relative_weeks(normalized)
+    if relative_weeks is not None:
+        target = today + timedelta(days=relative_weeks * 7)
+        label = "dentro de una semana" if relative_weeks == 1 else f"dentro de {relative_weeks} semanas"
+        return {
+            "resolved": True,
+            "scope": "relative_weeks",
+            "target_date": target,
+            "start_date": target,
+            "end_date": target,
+            "label": label,
+            "error": None,
+        }
+
+    relative_days = _parse_relative_days(normalized)
+    if relative_days is not None:
+        target = today + timedelta(days=relative_days)
+        return {
+            "resolved": True,
+            "scope": "relative_days",
+            "target_date": target,
+            "start_date": target,
+            "end_date": target,
+            "label": f"en {relative_days} dias",
+            "error": None,
+        }
+
     weekday = WEEKDAY_INDEX.get(normalized)
     if weekday is not None:
         delta = (weekday - today.weekday()) % 7
@@ -264,3 +347,26 @@ def resolve_agenda_time_hint(time_hint: str | None) -> dict:
 def _normalize_agenda_text(value: str | None) -> str:
     normalized = unicodedata.normalize("NFKD", (value or "").strip().lower())
     return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def _parse_relative_weeks(normalized: str) -> int | None:
+    if not normalized.startswith("dentro de "):
+        return None
+    suffix = normalized.removeprefix("dentro de ").strip()
+    if suffix in {"una semana", "1 semana"}:
+        return 1
+    if suffix in {"dos semanas", "2 semanas"}:
+        return 2
+    return None
+
+
+def _parse_relative_days(normalized: str) -> int | None:
+    if not normalized.startswith("en "):
+        return None
+    suffix = normalized.removeprefix("en ").strip()
+    if not suffix.endswith((" dia", " dias")):
+        return None
+    value = suffix.replace(" dias", "").replace(" dia", "").strip()
+    if value.isdigit():
+        return int(value)
+    return NUMBER_WORDS.get(value)

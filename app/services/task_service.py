@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+import re
 
 from app.db.session import SessionLocal
 from app.repositories import client_repository, project_repository, task_repository, task_update_repository
@@ -198,6 +199,14 @@ def get_tasks_due_today(today: date):
         db.close()
 
 
+def get_tasks_due_between_dates(start_date: date, end_date: date):
+    db = SessionLocal()
+    try:
+        return task_repository.get_tasks_due_between_dates(db, start_date, end_date)
+    finally:
+        db.close()
+
+
 def resolve_due_hint(due_hint: str | None, *, today: date | None = None) -> dict:
     today = today or date.today()
     normalized = _normalize_temporal_text(due_hint)
@@ -257,6 +266,52 @@ def resolve_due_hint(due_hint: str | None, *, today: date | None = None) -> dict
             "label": "esta semana",
             "degraded": True,
             "reason": "range_requires_concrete_day",
+        }
+
+    if normalized in {"la semana que viene", "semana que viene", "proxima semana", "la proxima semana"}:
+        return {
+            "resolved": False,
+            "time_scope": "next_week",
+            "due_hint": due_hint,
+            "due_date": None,
+            "label": "la semana que viene",
+            "degraded": True,
+            "reason": "range_requires_concrete_day",
+        }
+
+    if normalized in {"dentro de una semana", "dentro de 1 semana"}:
+        return {
+            "resolved": True,
+            "time_scope": "relative_weeks",
+            "due_hint": due_hint,
+            "due_date": today + timedelta(days=7),
+            "label": "dentro de una semana",
+            "degraded": False,
+            "reason": None,
+        }
+
+    if normalized in {"dentro de dos semanas", "dentro de 2 semanas"}:
+        return {
+            "resolved": True,
+            "time_scope": "relative_weeks",
+            "due_hint": due_hint,
+            "due_date": today + timedelta(days=14),
+            "label": "dentro de dos semanas",
+            "degraded": False,
+            "reason": None,
+        }
+
+    relative_days_match = re.fullmatch(r"en\s+(\d+)\s+dias?", normalized)
+    if relative_days_match:
+        relative_days = int(relative_days_match.group(1))
+        return {
+            "resolved": True,
+            "time_scope": "relative_days",
+            "due_hint": due_hint,
+            "due_date": today + timedelta(days=relative_days),
+            "label": f"en {relative_days} dias",
+            "degraded": False,
+            "reason": None,
         }
 
     return {

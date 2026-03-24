@@ -185,6 +185,147 @@ class AgendaBehaviorTests(unittest.TestCase):
         self.assertIn("16:00", response)
         self.assertIn("llamar a rosario capilar", response.lower())
 
+    def test_create_event_uses_content_when_agenda_title_is_missing(self):
+        parsed = {
+            "intent": "create_agenda_item",
+            "agenda_kind": "event",
+            "agenda_date_hint": "dentro de una semana",
+            "agenda_time_hint": "17:00",
+            "agenda_title": None,
+            "content": "reunion con alimentos",
+        }
+
+        with patch(
+            "app.services.query_response_service.create_agenda_item_conversational",
+            return_value={
+                "created": True,
+                "agenda_item_id": 12,
+                "title": "reunion con alimentos",
+                "scheduled_date": date.today().fromordinal(date.today().toordinal() + 7),
+                "scheduled_time": time(17, 0),
+                "kind": "event",
+                "note": None,
+            },
+        ) as create_mock:
+            response = build_response_from_query(
+                parsed,
+                user_query="agendá una reunion con alimentos para dentro de una semana a las 17:00",
+            )
+
+        self.assertIn("guarde el evento", response.lower())
+        self.assertNotIn("contenido", response.lower())
+        self.assertEqual(create_mock.call_args.args[0], "reunion con alimentos")
+
+    def test_create_event_for_relative_week(self):
+        parsed = parse_user_query("agendá una reunion con alimentos para dentro de una semana a las 17:00")
+
+        with patch(
+            "app.services.query_response_service.create_agenda_item_conversational",
+            return_value={
+                "created": True,
+                "agenda_item_id": 13,
+                "title": "reunion con alimentos",
+                "scheduled_date": date(2026, 3, 30),
+                "scheduled_time": time(17, 0),
+                "kind": "event",
+                "note": None,
+            },
+        ), patch(
+            "app.services.query_response_service.resolve_agenda_date_hint",
+            return_value={
+                "resolved": True,
+                "scope": "relative_weeks",
+                "target_date": date(2026, 3, 30),
+                "start_date": date(2026, 3, 30),
+                "end_date": date(2026, 3, 30),
+                "label": "dentro de una semana",
+                "error": None,
+            },
+        ), patch(
+            "app.services.query_response_service.resolve_agenda_time_hint",
+            return_value={
+                "resolved": True,
+                "scheduled_time": time(17, 0),
+                "label": "17:00",
+                "error": None,
+            },
+        ):
+            response = build_response_from_query(
+                parsed,
+                user_query="agendá una reunion con alimentos para dentro de una semana a las 17:00",
+            )
+
+        self.assertIn("guarde el evento", response.lower())
+        self.assertIn("17:00", response)
+
+    def test_create_reminder_for_two_weeks(self):
+        parsed = parse_user_query("recordame dentro de dos semanas revisar indicadores")
+
+        with patch(
+            "app.services.query_response_service.create_agenda_item_conversational",
+            return_value={
+                "created": True,
+                "agenda_item_id": 14,
+                "title": "revisar indicadores",
+                "scheduled_date": date(2026, 4, 2),
+                "scheduled_time": None,
+                "kind": "reminder",
+                "note": None,
+            },
+        ), patch(
+            "app.services.query_response_service.resolve_agenda_date_hint",
+            return_value={
+                "resolved": True,
+                "scope": "relative_weeks",
+                "target_date": date(2026, 4, 2),
+                "start_date": date(2026, 4, 2),
+                "end_date": date(2026, 4, 2),
+                "label": "dentro de dos semanas",
+                "error": None,
+            },
+        ):
+            response = build_response_from_query(parsed, user_query="recordame dentro de dos semanas revisar indicadores")
+
+        self.assertIn("recordatorio", response.lower())
+
+    def test_create_event_for_relative_days(self):
+        parsed = parse_user_query("agendá una llamada con Cam en 10 dias a las 11")
+
+        with patch(
+            "app.services.query_response_service.create_agenda_item_conversational",
+            return_value={
+                "created": True,
+                "agenda_item_id": 15,
+                "title": "llamada con cam",
+                "scheduled_date": date(2026, 4, 1),
+                "scheduled_time": time(11, 0),
+                "kind": "event",
+                "note": None,
+            },
+        ), patch(
+            "app.services.query_response_service.resolve_agenda_date_hint",
+            return_value={
+                "resolved": True,
+                "scope": "relative_days",
+                "target_date": date(2026, 4, 1),
+                "start_date": date(2026, 4, 1),
+                "end_date": date(2026, 4, 1),
+                "label": "en 10 dias",
+                "error": None,
+            },
+        ), patch(
+            "app.services.query_response_service.resolve_agenda_time_hint",
+            return_value={
+                "resolved": True,
+                "scheduled_time": time(11, 0),
+                "label": "11:00",
+                "error": None,
+            },
+        ):
+            response = build_response_from_query(parsed, user_query="agendá una llamada con Cam en 10 dias a las 11")
+
+        self.assertIn("11:00", response)
+
     def test_query_today_agenda(self):
         parsed = parse_user_query("que tengo para hoy")
         items = [make_agenda_item(1, "reunion con cam", date(2026, 3, 20), scheduled_time=time(10, 0))]
@@ -252,6 +393,99 @@ class AgendaBehaviorTests(unittest.TestCase):
         self.assertIn("esta semana", response.lower())
         self.assertIn("2026-03-21", response)
         self.assertIn("2026-03-22", response)
+
+    def test_query_next_days_agenda(self):
+        parsed = parse_user_query("que tengo en los proximos dias")
+        items = [
+            make_agenda_item(16, "llamada con cam", date(2026, 3, 24), scheduled_time=time(11, 0)),
+            make_agenda_item(17, "dentista", date(2026, 3, 25), scheduled_time=time(18, 0)),
+        ]
+
+        with patch(
+            "app.services.query_response_service.resolve_agenda_date_hint",
+            return_value={
+                "resolved": True,
+                "scope": "next_days",
+                "target_date": None,
+                "start_date": date(2026, 3, 24),
+                "end_date": date(2026, 3, 30),
+                "label": "los proximos dias",
+                "error": None,
+            },
+        ), patch("app.services.query_response_service.get_agenda_items_between_dates", return_value=items):
+            response = build_response_from_query(parsed, user_query="que tengo en los proximos dias")
+
+        self.assertIn("proximos dias", response.lower())
+        self.assertIn("llamada con cam", response.lower())
+
+    def test_query_next_week_agenda(self):
+        parsed = parse_user_query("que tengo la semana que viene")
+        items = [make_agenda_item(18, "reunion de planning", date(2026, 3, 30), scheduled_time=time(17, 0))]
+
+        with patch(
+            "app.services.query_response_service.resolve_agenda_date_hint",
+            return_value={
+                "resolved": True,
+                "scope": "next_week",
+                "target_date": None,
+                "start_date": date(2026, 3, 30),
+                "end_date": date(2026, 4, 5),
+                "label": "la semana que viene",
+                "error": None,
+            },
+        ), patch("app.services.query_response_service.get_agenda_items_between_dates", return_value=items):
+            response = build_response_from_query(parsed, user_query="que tengo la semana que viene")
+
+        self.assertIn("semana que viene", response.lower())
+        self.assertIn("reunion de planning", response.lower())
+
+    def test_query_two_weeks_target_agenda(self):
+        parsed = parse_user_query("que tengo dentro de dos semanas")
+        items = [make_agenda_item(19, "seguimiento", date(2026, 4, 2), scheduled_time=time(15, 0))]
+
+        with patch(
+            "app.services.query_response_service.resolve_agenda_date_hint",
+            return_value={
+                "resolved": True,
+                "scope": "relative_weeks",
+                "target_date": date(2026, 4, 2),
+                "start_date": date(2026, 4, 2),
+                "end_date": date(2026, 4, 2),
+                "label": "dentro de dos semanas",
+                "error": None,
+            },
+        ), patch("app.services.query_response_service.get_agenda_items_for_date", return_value=items):
+            response = build_response_from_query(parsed, user_query="que tengo dentro de dos semanas")
+
+        self.assertIn("dentro de dos semanas", response.lower())
+        self.assertIn("seguimiento", response.lower())
+
+    def test_query_future_horizon_agenda(self):
+        parsed = parse_user_query("que se viene")
+        items = [make_agenda_item(20, "reunion trimestral", date(2026, 4, 15), scheduled_time=time(9, 0))]
+
+        with patch(
+            "app.services.query_response_service.resolve_agenda_date_hint",
+            return_value={
+                "resolved": True,
+                "scope": "future_horizon",
+                "target_date": None,
+                "start_date": date(2026, 3, 24),
+                "end_date": date(2026, 4, 22),
+                "label": "mas adelante",
+                "error": None,
+            },
+        ), patch("app.services.query_response_service.get_agenda_items_between_dates", return_value=items):
+            response = build_response_from_query(parsed, user_query="que se viene")
+
+        self.assertIn("mas adelante", response.lower())
+        self.assertIn("reunion trimestral", response.lower())
+
+    def test_create_event_for_next_week_requires_concrete_day(self):
+        parsed = parse_user_query("agendá una reunion para la semana que viene")
+        response = build_response_from_query(parsed, user_query="agendá una reunion para la semana que viene")
+
+        self.assertIn("dia concreto", response.lower())
 
     def test_query_rest_of_day(self):
         parsed = parse_user_query("que me queda del dia")

@@ -477,20 +477,37 @@ class AcceptanceBackend:
             temporal_focus=temporal_focus,
         )
 
+    def tasks_due_between_dates(self, start_date: date, end_date: date) -> list[Any]:
+        return [
+            task
+            for task in sorted(
+                self.tasks,
+                key=lambda task: (
+                    task.due_date or date.max,
+                    task.created_at or datetime.min,
+                    task.id,
+                ),
+            )
+            if task.due_date and start_date <= task.due_date <= end_date and task.status != "hecha"
+        ]
+
     def missing_due_date_snapshot(self) -> dict:
         return build_missing_due_date_snapshot_from_tasks(self.tasks, today=self.today)
 
     def create_task(
         self,
-        project_id: int,
+        project_id: int | None,
         title: str,
         *,
         priority: str = "media",
         due_date: date | None = None,
         last_note: str | None = None,
         next_action: str | None = None,
+        project_name: str | None = None,
     ) -> dict:
-        project = self._find_project(project_id)
+        project = self._find_project(project_id) if project_id is not None else None
+        if not project:
+            project = self._get_or_create_inbox_project()
         if not project:
             return {"created": False, "error": "not_found"}
         task_id = max(task.id for task in self.tasks) + 1 if self.tasks else 1
@@ -507,12 +524,13 @@ class AcceptanceBackend:
             last_updated_at=datetime.combine(self.today, datetime.min.time()),
         )
         self.tasks.append(task)
-        self._record_mutation("create_task", {"task_id": task.id, "project_id": project_id, "title": title})
+        self._record_mutation("create_task", {"task_id": task.id, "project_id": project.id, "title": title})
         return {
             "created": True,
             "task_id": task.id,
             "task_title": task.title,
             "project_id": task.project_id,
+            "project_name": project.name,
             "field": "task",
             "priority": task.priority,
             "next_action": task.next_action,
@@ -638,6 +656,21 @@ class AcceptanceBackend:
 
     def _find_project(self, project_id: int) -> Any | None:
         return next((project for project in self.projects if project.id == project_id), None)
+
+    def _get_or_create_inbox_project(self):
+        existing = next((project for project in self.projects if project.name.lower() == "inbox"), None)
+        if existing:
+            return existing
+
+        inbox_client = next((client for client in self.clients if client.name.lower() == "agenda ai"), None)
+        if not inbox_client:
+            inbox_client = make_client(max((client.id for client in self.clients), default=0) + 1, "Agenda AI")
+            self.clients.append(inbox_client)
+
+        project = make_project(max((project.id for project in self.projects), default=0) + 1, "Inbox", inbox_client)
+        self.projects.append(project)
+        inbox_client.projects = [*getattr(inbox_client, "projects", []), project]
+        return project
 
 
 def build_default_backend() -> AcceptanceBackend:
@@ -1237,6 +1270,73 @@ DEFAULT_SCENARIOS = [
         ],
     ),
     Scenario(
+        scenario_id="AGD-007",
+        title="Agenda personal: crear evento futuro relativo",
+        category="agenda",
+        severity="medium",
+        tags=["daily", "agenda", "personal", "future"],
+        turns=[
+            ScenarioTurn(
+                "agendá una reunion con alimentos para dentro de una semana a las 17:00",
+                {
+                    "should_not_error": True,
+                    "should_have_intent": "create_agenda_item",
+                    "should_have_action_status": "executed",
+                    "should_contain_any": ["guarde el evento", "reunion con alimentos", "17:00"],
+                },
+            )
+        ],
+    ),
+    Scenario(
+        scenario_id="AGD-008",
+        title="Agenda personal: horizonte de proximos dias",
+        category="agenda",
+        severity="medium",
+        tags=["daily", "agenda", "personal", "future"],
+        turns=[
+            ScenarioTurn(
+                "que tengo en los proximos dias",
+                {
+                    "should_not_error": True,
+                    "should_have_intent": "get_agenda_items_summary",
+                    "should_have_scope": "planning",
+                    "should_contain_any": ["proximos dias", "dentista", "revisar indicadores"],
+                },
+            )
+        ],
+    ),
+    Scenario(
+        scenario_id="PLN-001",
+        title="Planificacion futura combinada: agenda y tareas",
+        category="planning",
+        severity="medium",
+        tags=["daily", "planning", "future"],
+        turns=[
+            ScenarioTurn(
+                "agendá una reunion con alimentos para dentro de una semana a las 17:00",
+                {
+                    "should_not_error": True,
+                    "should_have_action_status": "executed",
+                },
+            ),
+            ScenarioTurn(
+                "crea una tarea para seguimiento alimentos para dentro de una semana",
+                {
+                    "should_not_error": True,
+                    "should_have_action_status": "executed",
+                },
+            ),
+            ScenarioTurn(
+                "que se viene",
+                {
+                    "should_not_error": True,
+                    "should_have_response": True,
+                    "should_contain_all": ["reunion con alimentos", "seguimiento alimentos"],
+                },
+            ),
+        ],
+    ),
+    Scenario(
         scenario_id="CMP-002",
         title="Compuesto con degradacion parcial",
         category="compound",
@@ -1595,6 +1695,12 @@ def _run_check(check_name: str, expected: Any, **kwargs) -> tuple[bool, str]:
         values = [str(item).lower() for item in expected]
         matched = [item for item in values if item in lowered]
         return bool(matched), f"matches={matched}"
+    if check_name == "should_contain_all":
+        lowered = (response or "").lower()
+        values = [str(item).lower() for item in expected]
+        matched = [item for item in values if item in lowered]
+        missing = [item for item in values if item not in lowered]
+        return not missing, f"matches={matched} missing={missing}"
     if check_name == "should_not_contain_any":
         lowered = (response or "").lower()
         values = [str(item).lower() for item in expected]
@@ -1800,6 +1906,7 @@ def _patch_backend(backend: AcceptanceBackend):
             patch("app.services.query_response_service.get_operational_recommendation_project_snapshot", side_effect=backend.recommendation_project_snapshot),
             patch("app.services.query_response_service.get_temporal_task_snapshot", side_effect=backend.temporal_snapshot),
             patch("app.services.query_response_service.get_missing_due_date_snapshot", side_effect=backend.missing_due_date_snapshot),
+            patch("app.services.query_response_service.get_tasks_due_between_dates", side_effect=backend.tasks_due_between_dates),
             patch("app.services.query_response_service.create_agenda_item_conversational", side_effect=backend.create_agenda_item),
             patch("app.services.query_response_service.update_agenda_item_conversational", side_effect=backend.update_agenda_item),
             patch("app.services.query_response_service.delete_agenda_item_conversational", side_effect=backend.delete_agenda_item),

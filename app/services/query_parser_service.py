@@ -91,7 +91,11 @@ def _parse_agenda_intents(normalized: str) -> dict | None:
 
 
 def _parse_agenda_creation_intents(normalized: str) -> dict | None:
-    day_pattern = r"(hoy|mañana|manana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|esta semana)"
+    day_pattern = (
+        r"(hoy|mañana|manana|lunes|martes|miercoles|miércoles|jueves|viernes|sabado|sábado|domingo|"
+        r"esta semana|la semana que viene|semana que viene|proxima semana|la proxima semana|"
+        r"dentro de una semana|dentro de dos semanas|en \d{1,2} dias?)"
+    )
     time_pattern = r"(\d{1,2}(?::\d{2})?\s*hs?|\d{1,2}(?::\d{2})?)"
 
     match = re.search(rf"^agenda\s+(.+?)\s+para\s+(?:el\s+)?{day_pattern}\s+a\s+las\s+{time_pattern}$", normalized)
@@ -99,6 +103,30 @@ def _parse_agenda_creation_intents(normalized: str) -> dict | None:
         return _build_agenda_creation_payload("event", match.group(2), match.group(3), match.group(1))
 
     match = re.search(rf"^agenda\s+(.+?)\s+para\s+(?:el\s+)?{day_pattern}$", normalized)
+    if match:
+        return _build_agenda_creation_payload("event", match.group(2), None, match.group(1))
+
+    match = re.search(rf"^agenda\s+(.+?)\s+(?:el\s+)?{day_pattern}\s+a\s+las\s+{time_pattern}$", normalized)
+    if match:
+        return _build_agenda_creation_payload("event", match.group(2), match.group(3), match.group(1))
+
+    match = re.search(rf"^agenda\s+(.+?)\s+(?:el\s+)?{day_pattern}$", normalized)
+    if match:
+        return _build_agenda_creation_payload("event", match.group(2), None, match.group(1))
+
+    match = re.search(rf"^agend(?:a|á)me\s+(.+?)\s+para\s+(?:el\s+)?{day_pattern}\s+a\s+las\s+{time_pattern}$", normalized)
+    if match:
+        return _build_agenda_creation_payload("event", match.group(2), match.group(3), match.group(1))
+
+    match = re.search(rf"^agend(?:a|á)me\s+(.+?)\s+para\s+(?:el\s+)?{day_pattern}$", normalized)
+    if match:
+        return _build_agenda_creation_payload("event", match.group(2), None, match.group(1))
+
+    match = re.search(rf"^agend(?:a|á)me\s+(.+?)\s+(?:el\s+)?{day_pattern}\s+a\s+las\s+{time_pattern}$", normalized)
+    if match:
+        return _build_agenda_creation_payload("event", match.group(2), match.group(3), match.group(1))
+
+    match = re.search(rf"^agend(?:a|á)me\s+(.+?)\s+(?:el\s+)?{day_pattern}$", normalized)
     if match:
         return _build_agenda_creation_payload("event", match.group(2), None, match.group(1))
 
@@ -159,6 +187,62 @@ def _parse_agenda_query_intents(normalized: str) -> dict | None:
 
     if any(phrase in normalized for phrase in ["que tengo esta semana", "qué tengo esta semana"]):
         return {"intent": "get_agenda_items_summary", "agenda_query_scope": "this_week", "agenda_date_hint": "esta semana"}
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que tengo en los proximos dias",
+            "que tengo los proximos dias",
+            "que tengo en proximos dias",
+        ]
+    ):
+        return {
+            "intent": "get_agenda_items_summary",
+            "agenda_query_scope": "next_days",
+            "agenda_date_hint": "proximos dias",
+        }
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que tengo la semana que viene",
+            "que tengo semana que viene",
+            "que tengo la proxima semana",
+            "que tengo proxima semana",
+        ]
+    ):
+        return {
+            "intent": "get_agenda_items_summary",
+            "agenda_query_scope": "next_week",
+            "agenda_date_hint": "la semana que viene",
+        }
+
+    match = re.search(r"^que tengo dentro de (una|dos|\d+)\s+semanas?$", normalized)
+    if match:
+        raw_value = match.group(1).strip()
+        if raw_value == "1":
+            raw_value = "una"
+        elif raw_value == "2":
+            raw_value = "dos"
+        return {
+            "intent": "get_agenda_items_summary",
+            "agenda_query_scope": "future_target",
+            "agenda_date_hint": f"dentro de {raw_value} semana" if raw_value == "una" else f"dentro de {raw_value} semanas",
+        }
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "que se viene",
+            "que tengo mas adelante",
+            "que tengo en el futuro",
+        ]
+    ):
+        return {
+            "intent": "get_agenda_items_summary",
+            "agenda_query_scope": "future_horizon",
+            "agenda_date_hint": "futuro cercano",
+        }
 
     if any(phrase in normalized for phrase in ["que me queda del dia", "qué me queda del día"]):
         return {"intent": "get_agenda_items_summary", "agenda_query_scope": "rest_of_day", "agenda_date_hint": "hoy"}
@@ -606,7 +690,16 @@ def _extract_supported_due_hint(normalized: str) -> tuple[str, str | None, str |
         (r"\s+para\s+mañana$", "mañana", "tomorrow"),
         (r"\s+para\s+manana$", "manana", "tomorrow"),
         (r"\s+para\s+esta\s+semana$", "esta semana", "this_week"),
+        (r"\s+para\s+dentro\s+de\s+una\s+semana$", "dentro de una semana", "relative_weeks"),
+        (r"\s+para\s+dentro\s+de\s+dos\s+semanas$", "dentro de dos semanas", "relative_weeks"),
+        (r"\s+para\s+(?:la\s+)?semana\s+que\s+viene$", "la semana que viene", "next_week"),
+        (r"\s+para\s+(?:la\s+)?proxima\s+semana$", "proxima semana", "next_week"),
     ]
+    relative_day_match = re.search(r"\s+para\s+(en\s+\d+\s+dias?)$", normalized)
+    if relative_day_match:
+        matched = relative_day_match.group(1)
+        return re.sub(r"\s+para\s+en\s+\d+\s+dias?$", "", normalized).strip(), matched, "relative_days"
+
     for day_name in TEMPORAL_DAY_TERMS:
         patterns.append((rf"\s+para\s+(?:el\s+)?{day_name}$", day_name, "weekday"))
 

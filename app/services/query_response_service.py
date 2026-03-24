@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from app.services.client_service import get_active_clients
 from app.services.conversation_service import (
@@ -53,6 +53,7 @@ from app.services.task_service import (
     get_temporal_task_snapshot,
     get_task_operational_summary,
     get_tasks_by_client_id,
+    get_tasks_due_between_dates,
     get_tasks_by_project_id,
     get_tasks_by_status,
     is_inbox_reference,
@@ -659,14 +660,15 @@ def build_response_from_query(
 
 
 def _handle_agenda_creation_intent(parsed_query: dict, *, conversation_context: dict | None) -> str:
-    title = (parsed_query.get("agenda_title") or "").strip()
+    title = _resolve_creation_agenda_title(parsed_query)
     if not title:
         return _abort_with_context(parsed_query, "Necesito el contenido del evento o recordatorio para agendarlo.")
+    parsed_query["agenda_title"] = title
 
     date_resolution = _resolve_creation_agenda_date(parsed_query.get("agenda_date_hint"))
     if not date_resolution.get("resolved"):
         return _abort_with_context(parsed_query, "Necesito una fecha clara para agendar eso con seguridad.")
-    if date_resolution.get("scope") == "this_week":
+    if date_resolution.get("scope") in {"this_week", "next_week", "next_days", "future_horizon"} or not date_resolution.get("target_date"):
         return _abort_with_context(parsed_query, "Puedo guardar agenda personal con un dia concreto. Decime que dia de la semana queres usar.")
 
     time_hint = parsed_query.get("agenda_time_hint")
@@ -937,6 +939,12 @@ def _handle_agenda_query_intent(
     query_scope = parsed_query.get("agenda_query_scope") or "today"
     today = date.today()
     now = datetime.now()
+    if query_scope in {"next_days", "next_week", "future_target", "future_horizon"}:
+        return _handle_combined_future_summary(
+            parsed_query,
+            user_query=user_query,
+            conversation_context=conversation_context,
+        )
 
     if query_scope == "after_current":
         agenda_context = context.get("agenda_context") if isinstance(context, dict) and context.get("_isolated") else {}
@@ -965,20 +973,21 @@ def _handle_agenda_query_intent(
     if not date_resolution.get("resolved"):
         return _abort_with_context(parsed_query, "No pude ubicar esa fecha en la agenda con suficiente claridad.")
 
-    if query_scope == "this_week":
+    if query_scope in {"this_week", "next_week", "next_days", "future_horizon"}:
         items = get_agenda_items_between_dates(date_resolution["start_date"], date_resolution["end_date"])
         parsed_query["_agenda_items_for_context"] = items
         parsed_query["_conversation_context"] = _build_agenda_context(
             parsed_query,
-            query_scope="this_week",
-            target_date=date_resolution["start_date"],
+            query_scope=query_scope,
+            target_date=date_resolution.get("target_date"),
+            start_date=date_resolution["start_date"],
             anchor_time=None,
         )
         return _format_agenda_summary_response(
             parsed_query,
             items,
-            heading="Esto tenes en agenda esta semana:",
-            empty_message="No tenes nada agendado para esta semana.",
+            heading=_agenda_query_heading(query_scope, date_resolution),
+            empty_message=_agenda_query_empty_message(query_scope, date_resolution),
             include_date=True,
         )
 
@@ -1043,6 +1052,11 @@ def _handle_agenda_query_intent(
             empty_message=f"No, para {date_resolution['label']} no tenes nada agendado.",
         )
 
+    if query_scope == "future_target":
+        heading = f"Esto tenes agendado para {date_resolution['label']}:"
+        empty_message = f"No tenes nada agendado para {date_resolution['label']}."
+        return _format_agenda_summary_response(parsed_query, items, heading=heading, empty_message=empty_message)
+
     heading = {
         "today": "Esto tenes en agenda para hoy:",
         "tomorrow": "Esto tenes en agenda para mañana:",
@@ -1054,12 +1068,20 @@ def _handle_agenda_query_intent(
     return _format_agenda_summary_response(parsed_query, items, heading=heading, empty_message=empty_message)
 
 
-def _build_agenda_context(parsed_query: dict, *, query_scope: str, target_date: date, anchor_time: str | None) -> dict:
+def _build_agenda_context(
+    parsed_query: dict,
+    *,
+    query_scope: str,
+    target_date: date | None,
+    anchor_time: str | None,
+    start_date: date | None = None,
+) -> dict:
+    anchor_date = target_date or start_date
     context = {
         **_base_conversation_context(parsed_query, "agenda"),
         "agenda_context": {
             "query_scope": query_scope,
-            "anchor_date": target_date.isoformat(),
+            "anchor_date": anchor_date.isoformat() if anchor_date else None,
             "anchor_time": anchor_time,
         },
     }
@@ -1075,6 +1097,30 @@ def _build_agenda_context(parsed_query: dict, *, query_scope: str, target_date: 
         source=f"agenda_{query_scope}",
     )
     return context
+
+
+def _agenda_query_heading(query_scope: str, date_resolution: dict) -> str:
+    mapping = {
+        "this_week": "Esto tenes en agenda esta semana:",
+        "next_week": "Esto tenes en agenda la semana que viene:",
+        "next_days": "Esto tenes en agenda en los proximos dias:",
+        "future_horizon": "Esto es lo que se viene mas adelante:",
+    }
+    if query_scope == "future_target":
+        return f"Esto tenes agendado para {date_resolution.get('label')}:"
+    return mapping.get(query_scope, "Esto tenes en agenda:")
+
+
+def _agenda_query_empty_message(query_scope: str, date_resolution: dict) -> str:
+    mapping = {
+        "this_week": "No tenes nada agendado para esta semana.",
+        "next_week": "No tenes nada agendado para la semana que viene.",
+        "next_days": "No tenes nada agendado en los proximos dias.",
+        "future_horizon": "No encontre nada agendado mas adelante.",
+    }
+    if query_scope == "future_target":
+        return f"No tenes nada agendado para {date_resolution.get('label')}."
+    return mapping.get(query_scope, "No encontre nada agendado para ese rango.")
 
 
 def _format_agenda_summary_response(
@@ -1116,6 +1162,173 @@ def _format_agenda_summary_response(
         action_type="agenda_query",
     )
     return response
+
+
+def _handle_combined_future_summary(
+    parsed_query: dict,
+    *,
+    user_query: str | None,
+    conversation_context: dict | None,
+) -> str:
+    today_value = date.today()
+    query_scope = parsed_query.get("agenda_query_scope") or "future_horizon"
+    date_hint = parsed_query.get("agenda_date_hint") or "futuro cercano"
+    date_resolution = resolve_agenda_date_hint(date_hint, today=today_value)
+    if not date_resolution.get("resolved"):
+        return _abort_with_context(parsed_query, "No pude ubicar ese horizonte futuro con suficiente claridad.")
+
+    start_date = date_resolution.get("start_date") or date_resolution.get("target_date")
+    end_date = date_resolution.get("end_date") or date_resolution.get("target_date")
+    if not start_date or not end_date:
+        return _abort_with_context(parsed_query, "No pude armar un rango futuro claro para revisar eso.")
+
+    agenda_items = (
+        get_agenda_items_for_date(start_date)
+        if start_date == end_date
+        else get_agenda_items_between_dates(start_date, end_date)
+    )
+    tasks = get_tasks_due_between_dates(start_date, end_date)
+    combined_items = _build_combined_future_items(agenda_items, tasks)
+
+    parsed_query["_conversation_context"] = {
+        **_base_conversation_context(parsed_query, "planning"),
+        "planning_context": {
+            "query_scope": query_scope,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+        },
+    }
+
+    response = _format_combined_future_summary_response(
+        parsed_query,
+        combined_items,
+        query_scope=query_scope,
+        today_value=today_value,
+        date_label=date_resolution.get("label"),
+    )
+    _set_audit_trace(
+        parsed_query,
+        user_query=user_query,
+        response=response,
+        action_status="informational",
+        action_type="combined_future_query",
+    )
+    return response
+
+
+def _build_combined_future_items(agenda_items: list, tasks: list) -> list[dict]:
+    items: list[dict] = []
+    for item in agenda_items:
+        items.append(
+            {
+                "type": "agenda",
+                "date": getattr(item, "scheduled_date", None),
+                "time": getattr(item, "scheduled_time", None),
+                "title": getattr(item, "title", "Sin titulo"),
+                "project_name": None,
+                "client_name": None,
+            }
+        )
+    for task in tasks:
+        items.append(
+            {
+                "type": "task",
+                "date": getattr(task, "due_date", None),
+                "time": None,
+                "title": getattr(task, "title", "Sin titulo"),
+                "project_name": getattr(getattr(task, "project", None), "name", None),
+                "client_name": getattr(getattr(getattr(task, "project", None), "client", None), "name", None),
+            }
+        )
+
+    return sorted(
+        [item for item in items if item.get("date")],
+        key=lambda item: (
+            item["date"],
+            item["time"] is None,
+            item["time"] or datetime.max.time(),
+            item["title"].lower(),
+        ),
+    )
+
+
+def _format_combined_future_summary_response(
+    parsed_query: dict,
+    items: list[dict],
+    *,
+    query_scope: str,
+    today_value: date,
+    date_label: str | None,
+) -> str:
+    if not items:
+        return "No tenes compromisos proximos."
+
+    if query_scope == "future_horizon":
+        near_cutoff = today_value + timedelta(days=7)
+        near_items = [item for item in items if item["date"] <= near_cutoff]
+        later_items = [item for item in items if item["date"] > near_cutoff]
+        lines = ["Esto se viene:"]
+        if near_items:
+            lines.append("")
+            lines.append("Proximos dias:")
+            lines.extend(_format_combined_future_lines(near_items, today_value=today_value))
+        if later_items:
+            lines.append("")
+            lines.append("Mas adelante:")
+            lines.extend(_format_combined_future_lines(later_items, today_value=today_value))
+        return "\n".join(lines)
+
+    heading = {
+        "next_days": "Esto se viene en los proximos dias:",
+        "next_week": "Esto tenes la semana que viene:",
+        "future_target": f"Esto tenes para {date_label}:" if date_label else "Esto tenes mas adelante:",
+    }.get(query_scope, "Esto se viene:")
+    return "\n".join([heading, "", *_format_combined_future_lines(items, today_value=today_value)])
+
+
+def _format_combined_future_lines(items: list[dict], *, today_value: date) -> list[str]:
+    lines: list[str] = []
+    for item in items:
+        date_label = _future_date_label(item["date"], today_value=today_value)
+        time_value = item.get("time")
+        time_label = time_value.strftime("%H:%M") if time_value else ""
+        prefix = f"{date_label} {time_label}".strip()
+        metadata = _future_item_metadata(item)
+        lines.append(f"- {prefix} | {item['title']}{metadata}")
+    return lines
+
+
+def _future_date_label(target_date: date, *, today_value: date) -> str:
+    day_delta = (target_date - today_value).days
+    if day_delta == 0:
+        return "Hoy"
+    if day_delta == 1:
+        return "Manana"
+    if 2 <= day_delta <= 6:
+        weekday_names = [
+            "Lunes",
+            "Martes",
+            "Miercoles",
+            "Jueves",
+            "Viernes",
+            "Sabado",
+            "Domingo",
+        ]
+        return weekday_names[target_date.weekday()]
+    return target_date.strftime("%d/%m")
+
+
+def _future_item_metadata(item: dict) -> str:
+    if item.get("type") != "task":
+        return ""
+    project_name = item.get("project_name")
+    client_name = item.get("client_name")
+    parts = ["Tarea"]
+    if project_name:
+        parts.append(project_name)
+    if client_name:
+        parts.append(client_name)
+    return f" | {' / '.join(parts)}"
 
 
 def get_projects_for_client(client_id: int) -> list[dict]:
@@ -4480,6 +4693,14 @@ def _resolve_creation_agenda_date(date_hint: str | None) -> dict:
             "error": None,
         }
     return resolution
+
+
+def _resolve_creation_agenda_title(parsed_query: dict) -> str:
+    for field_name in ("agenda_title", "content", "task_name"):
+        value = (parsed_query.get(field_name) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _normalize_simple_temporal_text(value: str | None) -> str:

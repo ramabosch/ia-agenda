@@ -568,6 +568,25 @@ JSON:
   "entity_hint": null,
   "recommendation_focus": null
 }
+
+Usuario: que tengo la semana que viene
+JSON:
+{
+  "intent": "get_agenda_items_summary",
+  "client_name": null,
+  "project_name": null,
+  "task_name": null,
+  "task_id": null,
+  "project_id": null,
+  "content": null,
+  "new_status": null,
+  "new_priority": null,
+  "priority_direction": null,
+  "next_action": null,
+  "last_note": null,
+  "agenda_query_scope": "next_week",
+  "agenda_date_hint": "la semana que viene"
+}
 """.strip()
 
 SYSTEM_PROMPT = f"""
@@ -598,6 +617,7 @@ Reglas:
 19. Si el usuario usa referencias vagas como "eso", "el otro", "la otra", "lo de recien" o "lo anterior", usa intent = "expand_context".
 20. Si no hay un proyecto claro, deja project_name = null en vez de adivinar.
 21. Frases como "que hay para hoy", "como viene el dia", "resumen de hoy" o "que tenemos" deben mapear a intent = "get_daily_pulse".
+22. Frases como "que tengo en los proximos dias", "que tengo la semana que viene", "que se viene" o "que tengo en el futuro" deben mapear a intent = "get_agenda_items_summary" con agenda_query_scope y agenda_date_hint utiles.
 
 Intentos permitidos:
 - get_active_projects

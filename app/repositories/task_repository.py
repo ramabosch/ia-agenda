@@ -94,6 +94,19 @@ def get_tasks_due_today(db: Session, today: date) -> list[Task]:
     )
 
 
+def get_tasks_due_between_dates(db: Session, start_date: date, end_date: date) -> list[Task]:
+    return (
+        db.query(Task)
+        .options(joinedload(Task.project).joinedload(Project.client))
+        .filter(Task.due_date.is_not(None))
+        .filter(Task.due_date >= start_date)
+        .filter(Task.due_date <= end_date)
+        .filter(Task.status != "hecha")
+        .order_by(Task.due_date.asc(), Task.created_at.asc())
+        .all()
+    )
+
+
 def update_task_status(db: Session, task_id: int, new_status: str) -> Task | None:
     task = db.query(Task).filter(Task.id == task_id).first()
 
