@@ -441,7 +441,7 @@ class ParserBehaviorTests(unittest.TestCase):
             "task_name": "otra cosa",
             "_parser_source": "llm",
         }
-        with patch("app.services.hybrid_parser_service.parse_query_with_llm", return_value=llm_result):
+        with patch("app.services.hybrid_parser_service.parse_actions_with_llm", return_value=[llm_result]):
             parsed = parse_user_query_hybrid("cerrala")
         self.assertEqual(parsed["intent"], "update_task_status")
         self.assertEqual(parsed["_parser_source"], "rules")
@@ -456,7 +456,7 @@ class ParserBehaviorTests(unittest.TestCase):
             "agenda_title": None,
             "_parser_source": "llm",
         }
-        with patch("app.services.hybrid_parser_service.parse_query_with_llm", return_value=llm_agenda):
+        with patch("app.services.hybrid_parser_service.parse_actions_with_llm", return_value=[llm_agenda]):
             parsed_agenda = parse_user_query_hybrid("Agenda una reunion con CAM para manana a las 10:00")
 
         self.assertEqual(parsed_agenda["intent"], "create_agenda_item")
@@ -468,7 +468,7 @@ class ParserBehaviorTests(unittest.TestCase):
             "intent": "get_today_queries",
             "_parser_source": "llm",
         }
-        with patch("app.services.hybrid_parser_service.parse_query_with_llm", return_value=llm_inbox):
+        with patch("app.services.hybrid_parser_service.parse_actions_with_llm", return_value=[llm_inbox]):
             parsed_inbox = parse_user_query_hybrid("Que hay en el inbox?")
 
         self.assertEqual(parsed_inbox["intent"], "get_tasks_by_project_name")
@@ -480,7 +480,7 @@ class ParserBehaviorTests(unittest.TestCase):
             "task_name": "primera",
             "_parser_source": "llm",
         }
-        with patch("app.services.hybrid_parser_service.parse_query_with_llm", return_value=llm_ordinal):
+        with patch("app.services.hybrid_parser_service.parse_actions_with_llm", return_value=[llm_ordinal]):
             parsed_ordinal = parse_user_query_hybrid("Cerra la primera.")
 
         self.assertEqual(parsed_ordinal["intent"], "clarify_entity_reference")

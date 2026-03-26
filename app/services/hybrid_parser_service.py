@@ -1,6 +1,7 @@
 from app.config import USE_LLM_PARSER
 from app.services.llm_parser_service import parse_actions_with_llm
 from app.services.query_parser_service import parse_user_query as parse_user_query_rules
+from app.services.structured_logger import log_parser_decision
 
 EXECUTIVE_INTENTS = {
     "get_active_projects",
@@ -57,25 +58,44 @@ def parse_user_query_hybrid(query: str) -> dict:
         rules_result["_parser_source"] = "rules"
         return rules_result
 
-    llm_result = parse_query_with_llm(query)
     llm_actions = parse_actions_with_llm(query)
+    llm_result = _pick_primary_action(llm_actions)
     llm_intent = (llm_result or {}).get("intent", "unknown")
+
+    if llm_result is None:
+        # LLM no devolvió resultado utilizable
+        log_parser_decision(
+            decision="rules_fallback",
+            reason="llm_no_result",
+            query_preview=query,
+        )
+        rules_result["_parser_source"] = "rules"
+        return rules_result
+
+    if llm_intent in (None, "", "unknown"):
+        log_parser_decision(
+            decision="rules_fallback",
+            reason="llm_unknown_intent",
+            query_preview=query,
+        )
+        rules_result["_parser_source"] = "rules"
+        rules_result["_parser_decision"] = "llm_rejected"
+        return rules_result
 
     if _should_prefer_rules(query, rules_result, llm_result):
         rules_result["_parser_source"] = "rules"
         if llm_intent not in (None, "", "unknown"):
             rules_result["_parser_decision"] = "rules_over_llm"
+        log_parser_decision(
+            decision="rules_preferred",
+            reason="rules_have_better_fields",
+            query_preview=query,
+        )
         return rules_result
 
-    if llm_result and llm_intent not in (None, "", "unknown"):
-        llm_result["_actions"] = llm_actions
-        llm_result["_parser_decision"] = "llm_accepted"
-        return llm_result
-
-    rules_result["_parser_source"] = "rules"
-    if llm_result is not None:
-        rules_result["_parser_decision"] = "llm_rejected"
-    return rules_result
+    llm_result["_actions"] = llm_actions
+    llm_result["_parser_decision"] = "llm_accepted"
+    return llm_result
 
 
 def _pick_primary_action(actions: list[dict] | None) -> dict | None:
@@ -114,7 +134,7 @@ def _should_prefer_rules(query: str, rules_result: dict, llm_result: dict | None
         if llm_intent != rules_intent:
             return True
 
-    if rules_intent in (None, "", "unknown") and _is_short_or_follow_up(query):
+    if rules_intent in (None, "", "unknown") and _is_short_or_follow_up(query) and llm_intent in (None, "", "unknown"):
         return True
 
     if llm_result and _is_contextual_result(llm_result) and rules_intent in (None, "", "unknown"):

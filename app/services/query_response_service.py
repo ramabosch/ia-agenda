@@ -43,6 +43,7 @@ from app.services.task_service import (
     build_task_friction_summary,
     build_task_recommendation_summary,
     build_task_advanced_summary,
+    get_all_open_tasks,
     get_executive_task_snapshot,
     get_followup_task_snapshot,
     get_inbox_tasks,
@@ -345,6 +346,20 @@ def build_response_from_query(
         return _format_advanced_client_summary(advanced_summary)
 
     if intent == "get_open_tasks_by_client_name":
+        client_name_hint = parsed_query.get("client_name")
+        if not client_name_hint:
+            tasks = get_all_open_tasks()
+            if not tasks:
+                return "No encontré tareas abiertas."
+            lines = ["Estas son todas las tareas abiertas:"]
+            for task in tasks:
+                project_name = task.project.name if task.project else "Sin proyecto"
+                client_label = task.project.client.name if task.project and task.project.client else "Sin cliente"
+                lines.append(
+                    f"- {task.title} | Cliente: {client_label} | Estado: {task.status} | Prioridad: {task.priority} | Proyecto: {project_name}"
+                )
+            return "\n".join(lines)
+
         client_message = _require_resolved_entity(resolved_references, "client", "cliente", action_text="mirar pendientes")
         if client_message:
             return _abort_with_context(parsed_query, client_message)

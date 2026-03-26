@@ -186,6 +186,16 @@ def get_open_tasks_by_client_id(db: Session, client_id: int) -> list[Task]:
         .all()
     )
 
+def get_all_open_tasks(db: Session) -> list[Task]:
+    return (
+        db.query(Task)
+        .options(joinedload(Task.project).joinedload(Project.client))
+        .filter(Task.status != "hecha")
+        .order_by(Task.id.desc())
+        .all()
+    )
+
+
 def update_task_priority(db: Session, task_id: int, new_priority: str) -> Task | None:
     task = db.query(Task).filter(Task.id == task_id).first()
 

@@ -195,6 +195,18 @@ def resolve_agenda_date_hint(date_hint: str | None, *, today: date | None = None
             "error": None,
         }
 
+    if normalized in {"pasado manana", "pasado mañana"}:
+        target = today + timedelta(days=2)
+        return {
+            "resolved": True,
+            "scope": "day_after_tomorrow",
+            "target_date": target,
+            "start_date": target,
+            "end_date": target,
+            "label": "pasado mañana",
+            "error": None,
+        }
+
     if normalized == "esta semana":
         end_of_week = today + timedelta(days=max(0, 6 - today.weekday()))
         return {
@@ -247,6 +259,19 @@ def resolve_agenda_date_hint(date_hint: str | None, *, today: date | None = None
             "error": None,
         }
 
+    dentro_days = _parse_dentro_de_days(normalized)
+    if dentro_days is not None:
+        target = today + timedelta(days=dentro_days)
+        return {
+            "resolved": True,
+            "scope": "relative_days",
+            "target_date": target,
+            "start_date": target,
+            "end_date": target,
+            "label": f"dentro de {dentro_days} dias",
+            "error": None,
+        }
+
     relative_weeks = _parse_relative_weeks(normalized)
     if relative_weeks is not None:
         target = today + timedelta(days=relative_weeks * 7)
@@ -271,6 +296,23 @@ def resolve_agenda_date_hint(date_hint: str | None, *, today: date | None = None
             "start_date": target,
             "end_date": target,
             "label": f"en {relative_days} dias",
+            "error": None,
+        }
+
+    next_weekday = _parse_next_weekday(normalized)
+    if next_weekday is not None:
+        delta = (next_weekday - today.weekday()) % 7
+        if delta == 0:
+            delta = 7
+        target = today + timedelta(days=delta)
+        day_name = normalized.removeprefix("el ").removesuffix(" que viene").strip()
+        return {
+            "resolved": True,
+            "scope": "weekday",
+            "target_date": target,
+            "start_date": target,
+            "end_date": target,
+            "label": f"el {day_name} que viene",
             "error": None,
         }
 
@@ -301,9 +343,27 @@ def resolve_agenda_date_hint(date_hint: str | None, *, today: date | None = None
     }
 
 
+def normalize_time_hint(raw: str | None) -> str | None:
+    """Remove Spanish time prefixes ('a las', 'las', 'a la', 'la') from a time hint string.
+
+    Returns the cleaned string, or None if input is empty.
+    Examples:
+        "a las 17:00" → "17:00"
+        "las 9:00"    → "9:00"
+        "17:00"       → "17:00"
+    """
+    cleaned = _normalize_agenda_text(raw)
+    if not cleaned:
+        return None
+    for prefix in ("a las ", "las ", "a la ", "la "):
+        if cleaned.startswith(prefix):
+            return cleaned.removeprefix(prefix).strip()
+    return cleaned
+
+
 def resolve_agenda_time_hint(time_hint: str | None) -> dict:
-    normalized = _normalize_agenda_text(time_hint)
-    if not normalized:
+    normalized = normalize_time_hint(time_hint)
+    if normalized is None:
         return {
             "resolved": True,
             "scheduled_time": None,
@@ -350,6 +410,7 @@ def _normalize_agenda_text(value: str | None) -> str:
 
 
 def _parse_relative_weeks(normalized: str) -> int | None:
+    """Returns number of weeks for 'dentro de X semana/semanas', else None."""
     if not normalized.startswith("dentro de "):
         return None
     suffix = normalized.removeprefix("dentro de ").strip()
@@ -361,12 +422,36 @@ def _parse_relative_weeks(normalized: str) -> int | None:
 
 
 def _parse_relative_days(normalized: str) -> int | None:
+    """Returns number of days for 'en X dia/dias' or 'en X semana/semanas', else None."""
     if not normalized.startswith("en "):
         return None
     suffix = normalized.removeprefix("en ").strip()
-    if not suffix.endswith((" dia", " dias")):
+    if suffix.endswith((" dia", " dias")):
+        value = suffix.replace(" dias", "").replace(" dia", "").strip()
+        n = int(value) if value.isdigit() else NUMBER_WORDS.get(value)
+        return n
+    if suffix.endswith((" semana", " semanas")):
+        value = suffix.replace(" semanas", "").replace(" semana", "").strip()
+        n = int(value) if value.isdigit() else NUMBER_WORDS.get(value)
+        return n * 7 if n is not None else None
+    return None
+
+
+def _parse_dentro_de_days(normalized: str) -> int | None:
+    """Returns number of days for 'dentro de N dia/dias', else None."""
+    if not normalized.startswith("dentro de "):
         return None
-    value = suffix.replace(" dias", "").replace(" dia", "").strip()
-    if value.isdigit():
-        return int(value)
-    return NUMBER_WORDS.get(value)
+    suffix = normalized.removeprefix("dentro de ").strip()
+    if suffix.endswith((" dia", " dias")):
+        value = suffix.replace(" dias", "").replace(" dia", "").strip()
+        n = int(value) if value.isdigit() else NUMBER_WORDS.get(value)
+        return n
+    return None
+
+
+def _parse_next_weekday(normalized: str) -> int | None:
+    """Returns weekday index (0=Mon) for 'el X que viene' or 'X que viene', else None."""
+    if not normalized.endswith(" que viene"):
+        return None
+    day_name = normalized.removeprefix("el ").removesuffix(" que viene").strip()
+    return WEEKDAY_INDEX.get(day_name)

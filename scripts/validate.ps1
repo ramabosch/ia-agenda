@@ -55,6 +55,8 @@ modules = [
     "app.services.query_response_service",
     "app.services.task_service",
     "app.services.project_service",
+    "app.services.structured_logger",
+    "app.services.input_normalizer",
 ]
 
 for name in modules:

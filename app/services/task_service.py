@@ -372,6 +372,14 @@ def update_task_main_fields(
     finally:
         db.close()
 
+def get_all_open_tasks():
+    db = SessionLocal()
+    try:
+        return task_repository.get_all_open_tasks(db)
+    finally:
+        db.close()
+
+
 def get_open_tasks_by_client_id(client_id: int):
     db = SessionLocal()
     try:

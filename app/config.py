@@ -22,3 +22,9 @@ LLM_API_KEY = "local-key"
 LLM_MODEL_NAME = "qwen2.5-7b-instruct"
 
 LLM_TIMEOUT_SECONDS = 30
+
+# =========================
+# Logging estructurado
+# =========================
+
+ENABLE_STRUCTURED_LOGGING = True

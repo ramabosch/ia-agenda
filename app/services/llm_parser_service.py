@@ -10,6 +10,7 @@ from app.config import (
     LLM_PARSER_URL,
     LLM_TIMEOUT_SECONDS,
 )
+from app.services.structured_logger import log_parser_decision
 
 ALLOWED_INTENTS = {
     "get_daily_pulse",
@@ -1074,9 +1075,23 @@ def parse_actions_with_llm(user_query: str) -> list[dict[str, Any]]:
         raw_content = data["choices"][0]["message"]["content"]
         cleaned = _clean_model_output(raw_content)
         if not cleaned:
+            log_parser_decision(
+                decision="llm_fallback",
+                reason="llm_empty_response",
+                query_preview=user_query,
+            )
             return []
 
-        parsed = json.loads(cleaned)
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            log_parser_decision(
+                decision="llm_fallback",
+                reason="llm_json_error",
+                query_preview=user_query,
+            )
+            return []
+
         if isinstance(parsed, list):
             candidates = parsed
         elif isinstance(parsed, dict):
@@ -1097,6 +1112,11 @@ def parse_actions_with_llm(user_query: str) -> list[dict[str, Any]]:
         return actions
 
     except Exception:
+        log_parser_decision(
+            decision="llm_fallback",
+            reason="llm_exception",
+            query_preview=user_query,
+        )
         return []
 
 

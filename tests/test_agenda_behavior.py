@@ -19,7 +19,7 @@ class AgendaBehaviorTests(unittest.TestCase):
             "_parser_source": "llm",
         }
 
-        with patch("app.services.hybrid_parser_service.parse_query_with_llm", return_value=llm_result), patch(
+        with patch("app.services.hybrid_parser_service.parse_actions_with_llm", return_value=[llm_result]), patch(
             "app.services.query_response_service.create_agenda_item_conversational",
             return_value={
                 "created": True,

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import time
 from copy import deepcopy
 
 from app.services.conversation_service import save_conversation
 from app.services.hybrid_parser_service import parse_user_query_hybrid
+from app.services.input_normalizer import normalize_input
 from app.services.query_response_service import build_response_from_query
+from app.services.structured_logger import log_conversation_turn
+
+_FALLBACK_RESPONSE = "No entendí bien eso. ¿Podés reformularlo?"
 
 
 def process_conversation_turn(
@@ -13,41 +18,72 @@ def process_conversation_turn(
     conversation_context: dict | None = None,
     persist_log: bool = False,
 ) -> dict:
-    current_context = deepcopy(conversation_context) if isinstance(conversation_context, dict) else {}
-    if not current_context:
-        current_context = {"_new_session": True}
-    elif not current_context.get("_isolated"):
-        current_context["_new_session"] = True
-    parsed_query = parse_user_query_hybrid(user_query)
-    response_text = build_response_from_query(
-        parsed_query,
-        user_query=user_query,
-        conversation_context=current_context,
-    )
-    updated_context = deepcopy(parsed_query.get("_conversation_context") or {})
-    updated_context = _merge_short_term_context(
-        previous_context=current_context,
-        updated_context=updated_context,
-        parsed_query=parsed_query,
-    )
-    audit_trace = deepcopy(parsed_query.get("_audit_trace") or {})
-    resolved_references = deepcopy(parsed_query.get("_resolved_references") or {})
+    t_start = time.monotonic()
+    try:
+        current_context = deepcopy(conversation_context) if isinstance(conversation_context, dict) else {}
+        if not current_context:
+            current_context = {"_new_session": True}
+        elif not current_context.get("_isolated"):
+            current_context["_new_session"] = True
 
-    if persist_log:
-        save_conversation(
-            user_input=user_query,
-            parsed_intent=str(parsed_query),
-            response_output=response_text,
+        # Normalizar solo para parsing; el original se preserva para respuestas y DB
+        normalized_query = normalize_input(user_query)
+        parsed_query = parse_user_query_hybrid(normalized_query)
+
+        response_text = build_response_from_query(
+            parsed_query,
+            user_query=user_query,
+            conversation_context=current_context,
+        )
+        updated_context = deepcopy(parsed_query.get("_conversation_context") or {})
+        updated_context = _merge_short_term_context(
+            previous_context=current_context,
+            updated_context=updated_context,
+            parsed_query=parsed_query,
+        )
+        audit_trace = deepcopy(parsed_query.get("_audit_trace") or {})
+        resolved_references = deepcopy(parsed_query.get("_resolved_references") or {})
+
+        if persist_log:
+            save_conversation(
+                user_input=user_query,
+                parsed_intent=str(parsed_query),
+                response_output=response_text,
+            )
+
+        latency_ms = (time.monotonic() - t_start) * 1000
+        log_conversation_turn(
+            intent=parsed_query.get("intent"),
+            parser_source=parsed_query.get("_parser_source"),
+            action_status=(audit_trace.get("action_status") or "read"),
+            latency_ms=latency_ms,
         )
 
-    return {
-        "user_query": user_query,
-        "response_text": response_text,
-        "parsed_query": parsed_query,
-        "conversation_context": updated_context,
-        "audit_trace": audit_trace,
-        "resolved_references": resolved_references,
-    }
+        return {
+            "user_query": user_query,
+            "response_text": response_text,
+            "parsed_query": parsed_query,
+            "conversation_context": updated_context,
+            "audit_trace": audit_trace,
+            "resolved_references": resolved_references,
+        }
+
+    except Exception:
+        latency_ms = (time.monotonic() - t_start) * 1000
+        log_conversation_turn(
+            intent="unknown",
+            parser_source="error",
+            action_status="error",
+            latency_ms=latency_ms,
+        )
+        return {
+            "user_query": user_query,
+            "response_text": _FALLBACK_RESPONSE,
+            "parsed_query": {},
+            "conversation_context": conversation_context or {},
+            "audit_trace": {},
+            "resolved_references": {},
+        }
 
 
 def _merge_short_term_context(

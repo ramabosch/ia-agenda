@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -ExecutionPolicy Bypass -File scripts/validate.ps1)",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -File scripts/validate.ps1)",
+      "Bash(python:*)",
+      "Bash(.venvScriptspython.exe -m unittest tests.test_structured_logger tests.test_input_normalizer tests.test_parser_fallback -v)",
+      "Bash(.venv/Scripts/python.exe -m unittest tests.test_structured_logger tests.test_input_normalizer tests.test_parser_fallback -v 2>&1)",
+      "Bash(.venv/Scripts/python.exe -m unittest tests.test_parser_fallback.ParserFallbackTests.test_llm_json_decode_error_returns_empty -v 2>&1)",
+      "Bash(grep -E \"FAIL|ERROR|Ran|OK$|exit\")",
+      "Bash(.venv/Scripts/python.exe -c \"\nfrom app.services.input_normalizer import normalize_input\nprint\\(repr\\(normalize_input\\('qué se viene?'\\)\\)\\)\nprint\\(repr\\(normalize_input\\('tmb agendá eso'\\)\\)\\)\nprint\\(repr\\(normalize_input\\('Agenda una reunion con CAM para manana a las 10:00'\\)\\)\\)\n\")",
+      "Bash(grep -E \"FAIL|ERROR|^Ran |OK$|Validacion\")",
+      "Bash(grep -E \"==|FAIL|ERROR|^Ran |^OK$|Validacion\")",
+      "Bash(.venv/Scripts/python.exe -m unittest tests.test_session60 -v)"
+    ]
+  }
+}
